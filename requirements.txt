@@ -1,5 +1,0 @@
-streamlit
-python-dotenv
-pypdf
-langchain-google-genai
-pydantic
