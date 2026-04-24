@@ -1,0 +1,31 @@
+# Environment files
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Streamlit
+.streamlit/
+
+# Uploaded files
+data/uploads/*
+!data/uploads/.gitkeep
+
+# Vector database / generated retrieval data
+data/vector_db/*
+!data/vector_db/.gitkeep
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/

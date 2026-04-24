@@ -1,0 +1,8 @@
+streamlit
+python-dotenv
+pypdf
+pydantic
+tenacity
+langchain-google-genai
+langchain-chroma
+langchain-text-splitters
