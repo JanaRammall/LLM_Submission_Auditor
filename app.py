@@ -173,7 +173,7 @@ def cached_pdf_text(file_bytes: bytes, kind: str) -> str:
 
 
 @st.cache_data(show_spinner=False)
-def cached_related_papers(report_text: str, limit: int = 5):
+def cached_related_papers(report_text: str, limit: int = 5, pipeline_version: str = "semantic-v5"):
     return get_related_papers_from_report(
         report_text=report_text,
         limit=limit,
@@ -288,7 +288,7 @@ st.markdown(
 st.markdown('<div class="top-nav-wrap">', unsafe_allow_html=True)
 page = st.radio(
     "Navigation",
-    ["Evaluation", "Similarity Check", "Chatbot"],
+    ["Submission", "Evaluation", "Similarity Check", "Novelty Directions", "Chatbot"],
     horizontal=True,
     label_visibility="collapsed",
     key="top_nav_page",
@@ -296,52 +296,148 @@ page = st.radio(
 st.markdown("</div>", unsafe_allow_html=True)
 
 # =========================
-# Evaluation Page
+# Submission Page
 # =========================
-if page == "Evaluation":
+if page == "Submission":
     st.markdown('<div class="section-title">Upload Submission</div>', unsafe_allow_html=True)
 
-    uploaded_instructions = st.file_uploader(
-        "Upload the project instructions / rubric PDF",
-        type=["pdf"],
-        key="instructions_uploader",
-    )
+    if compiled:
+        criteria_count = len(compiled.criteria)
+        store_id = html.escape(st.session_state.get("store_id", "N/A") or "N/A")
+        project_title = html.escape(compiled.project_title)
+        related_status = html.escape(related_papers_status or "not ready")
 
-    uploaded_report = st.file_uploader(
-        "Upload the student report PDF",
-        type=["pdf"],
-        key="report_uploader",
-    )
+        st.markdown(
+            f"""
+<div class="submission-status">
+    <div>
+        <div class="submission-kicker">Current analysis</div>
+        <div class="submission-title">{project_title}</div>
+        <div class="submission-meta">Criteria: {criteria_count} &nbsp;|&nbsp; Vector store: {store_id} &nbsp;|&nbsp; Related papers: {related_status}</div>
+    </div>
+</div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.caption("Upload new files and click Run Analysis to replace the current analysis.")
+
+    upload_col1, upload_col2 = st.columns(2)
+    with upload_col1:
+        uploaded_instructions = st.file_uploader(
+            "Project instructions / rubric PDF",
+            type=["pdf"],
+            key="instructions_uploader",
+        )
+
+    with upload_col2:
+        uploaded_report = st.file_uploader(
+            "Student report PDF",
+            type=["pdf"],
+            key="report_uploader",
+        )
 
     run_clicked = st.button("Run Analysis")
 
     if uploaded_instructions is not None and uploaded_report is not None and run_clicked:
         try:
             run_full_analysis(uploaded_instructions, uploaded_report)
-            st.success("Analysis completed.")
+            st.success("Analysis completed. Open the Evaluation tab to review the results.")
         except Exception as e:
             st.error(f"Process failed: {e}")
 
+# =========================
+# Evaluation Page
+# =========================
+elif page == "Evaluation":
     compiled = st.session_state.compiled_rubric
     audit_report = st.session_state.audit_report
     report_features = st.session_state.report_features
     related_papers_result = st.session_state.related_papers_result
     related_papers_status = st.session_state.related_papers_status
 
+    if not compiled and not audit_report and not report_features:
+        st.info("Run analysis from the Submission tab first.")
+
     if compiled:
         st.markdown('<div class="section-title">Compact Rubric</div>', unsafe_allow_html=True)
-        st.write(f"**Project Title:** {compiled.project_title}")
         st.caption(f"Criteria used: {len(compiled.criteria)}")
 
         with st.expander("View compact criteria", expanded=False):
             for criterion in compiled.criteria:
-                st.markdown(f"**{criterion.criterion_id} — {criterion.title}**")
+                st.markdown(f"**{criterion.criterion_id} - {criterion.title}**")
                 st.write(criterion.description)
                 st.divider()
 
     if report_features:
         st.markdown('<div class="section-title">Deterministic Report Analysis</div>', unsafe_allow_html=True)
-        st.json(report_features)
+
+        sections = report_features.get("sections", {})
+        detected_sections = [name for name, present in sections.items() if present]
+        missing_sections = [name for name, present in sections.items() if not present]
+        reference_years = report_features.get("reference_years_found", [])
+        recent_refs = report_features.get("recent_reference_count_2025_2026", 0)
+        reference_count = report_features.get("reference_count", 0)
+        page_count = report_features.get("page_count", 0)
+        has_references = report_features.get("has_references_block", False)
+
+        section_items_html = "".join(
+            f'<span class="analysis-chip analysis-chip-pass">{html.escape(name.title())}</span>'
+            for name in detected_sections
+        ) or '<span class="analysis-chip analysis-chip-muted">No sections detected</span>'
+
+        missing_items_html = "".join(
+            f'<span class="analysis-chip analysis-chip-warn">{html.escape(name.title())}</span>'
+            for name in missing_sections
+        ) or '<span class="analysis-chip analysis-chip-pass">No missing sections</span>'
+
+        unique_years = sorted(set(reference_years), reverse=True)[:12]
+        years_html = "".join(
+            f'<span class="analysis-chip">{year}</span>'
+            for year in unique_years
+        ) or '<span class="analysis-chip analysis-chip-muted">No years found</span>'
+
+        references_status = "Detected" if has_references else "Not detected"
+
+        st.markdown(
+            f"""
+<div class="analysis-panel">
+    <div class="analysis-metric-grid">
+        <div class="analysis-metric">
+            <div class="analysis-metric-label">Estimated pages</div>
+            <div class="analysis-metric-value">{page_count}</div>
+        </div>
+        <div class="analysis-metric">
+            <div class="analysis-metric-label">References</div>
+            <div class="analysis-metric-value">{reference_count}</div>
+        </div>
+        <div class="analysis-metric">
+            <div class="analysis-metric-label">Recent refs 2025-2026</div>
+            <div class="analysis-metric-value">{recent_refs}</div>
+        </div>
+        <div class="analysis-metric">
+            <div class="analysis-metric-label">References block</div>
+            <div class="analysis-metric-value analysis-metric-text">{references_status}</div>
+        </div>
+    </div>
+    <div class="analysis-section">
+        <div class="analysis-label">Detected sections</div>
+        <div class="analysis-chip-row">{section_items_html}</div>
+    </div>
+    <div class="analysis-section">
+        <div class="analysis-label">Missing / not detected</div>
+        <div class="analysis-chip-row">{missing_items_html}</div>
+    </div>
+    <div class="analysis-section">
+        <div class="analysis-label">Reference years found</div>
+        <div class="analysis-chip-row">{years_html}</div>
+    </div>
+</div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        with st.expander("View raw analysis data", expanded=False):
+            st.json(report_features)
 
     if audit_report:
         st.markdown('<div class="section-title">Evaluation Summary</div>', unsafe_allow_html=True)
@@ -404,39 +500,6 @@ if page == "Evaluation":
             )
             st.markdown(card_html, unsafe_allow_html=True)
 
-        st.markdown('<div class="section-title">Related Papers Preview</div>', unsafe_allow_html=True)
-
-        if related_papers_status == "ready" and related_papers_result:
-            if not related_papers_result.papers:
-                st.info("No strong related papers were found.")
-            else:
-                for paper in related_papers_result.papers[:2]:
-                    title = html.escape(paper.title or "Untitled Paper")
-                    venue = html.escape(paper.venue or "N/A")
-                    year = html.escape(str(paper.year) if paper.year else "N/A")
-                    reason = html.escape(paper.similarity_reason or "No similarity note available.")
-
-                    st.markdown(
-                        f"""
-<div class="paper-card paper-card-compact">
-    <div class="paper-card-topline">
-        <span class="paper-year">{year}</span>
-        <span class="paper-venue">{venue}</span>
-    </div>
-    <div class="paper-title">{title}</div>
-    <div class="paper-meta">{year} • {venue}</div>
-    <div class="paper-reason">{reason}</div>
-</div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-
-            st.info("Open the Similarity Check page to see the full list.")
-        elif related_papers_status == "failed":
-            st.warning("Related papers could not be prepared in this run.")
-        else:
-            st.info("Related papers are not ready yet.")
-
 # Similarity page
 elif page == "Similarity Check":
     st.markdown('<div class="section-title">Similarity Check</div>', unsafe_allow_html=True)
@@ -461,6 +524,10 @@ elif page == "Similarity Check":
                 """,
                 unsafe_allow_html=True,
             )
+            st.caption(
+                "This score measures semantic relatedness between the submitted report and candidate academic papers. "
+                "It is not a plagiarism score."
+            )
 
             if not related_papers_result.papers:
                 st.info("No strong related papers were found.")
@@ -474,6 +541,13 @@ elif page == "Similarity Check":
                     reason = html.escape(paper.similarity_reason or "No similarity reason available.")
                     abstract = html.escape(paper.abstract or "No abstract available.")
                     url = paper.url or ""
+                    score = html.escape(f"{getattr(paper, 'similarity_score', 0.0):.1f}")
+                    confidence = html.escape(getattr(paper, "confidence", "Medium"))
+                    matched_chunks = getattr(paper, "matched_report_chunks", []) or []
+                    matched_chunks_html = "".join(
+                        f'<div class="matched-chunk">{html.escape(chunk)}</div>'
+                        for chunk in matched_chunks
+                    ) or '<div class="matched-chunk">No matched chunks available.</div>'
 
                     link_html = f'<a class="paper-link" href="{html.escape(url)}" target="_blank">Open paper</a>' if url else ""
 
@@ -483,9 +557,11 @@ elif page == "Similarity Check":
     <div class="paper-card-topline">
         <span class="paper-year">{year}</span>
         <span class="paper-venue">{venue}</span>
+        <span class="paper-score">Content Similarity: {score}%</span>
+        <span class="paper-confidence">Confidence: {confidence}</span>
     </div>
     <div class="paper-title">{title}</div>
-    <div class="paper-meta">{year} • {venue}</div>
+    <div class="paper-meta">{year} - {venue}</div>
     <div class="paper-reason-label">Why it is similar</div>
     <div class="paper-reason">{reason}</div>
     <div class="meta-pill-row">
@@ -494,6 +570,10 @@ elif page == "Similarity Check":
     <details class="paper-abstract-details">
         <summary>Abstract</summary>
         <div class="paper-abstract">{abstract}</div>
+    </details>
+    <details class="paper-abstract-details">
+        <summary>Matched report chunks</summary>
+        <div class="matched-chunks">{matched_chunks_html}</div>
     </details>
     <div class="link-line">{link_html}</div>
 </div>
@@ -536,6 +616,100 @@ elif page == "Similarity Check":
                 except Exception as e:
                     st.error(f"Similarity check failed: {e}")
 
+# Novelty directions page
+elif page == "Novelty Directions":
+    st.markdown('<div class="section-title">Novelty Direction Recommender</div>', unsafe_allow_html=True)
+
+    if not report_text:
+        st.info("Run the evaluation first so the system can prepare related-paper evidence.")
+    elif related_papers_status == "ready" and related_papers_result:
+        novelty_analysis = getattr(related_papers_result, "novelty_analysis", None)
+
+        if not novelty_analysis:
+            st.warning("Novelty directions were not generated for this run.")
+        else:
+            query_title = html.escape(related_papers_result.query_title or "Submitted Project")
+            query_summary = html.escape(related_papers_result.query_summary or "No summary available.")
+            crowded_topics = getattr(novelty_analysis, "crowded_topics", []) or []
+            crowded_topics_html = "".join(
+                f'<span class="novelty-chip">{html.escape(topic)}</span>'
+                for topic in crowded_topics
+            ) or '<span class="novelty-chip">No crowded topics identified.</span>'
+
+            st.markdown(
+                f"""
+<div class="novelty-panel">
+    <div class="novelty-kicker">Research Opportunity Analysis</div>
+    <div class="novelty-title">{query_title}</div>
+    <div class="novelty-note">{query_summary}</div>
+    <div class="novelty-note">Based on the retrieved related papers, these areas appear crowded or promising. This is advisory, not a claim about the entire research literature.</div>
+    <div class="novelty-label">Crowded topics</div>
+    <div class="novelty-chip-row">{crowded_topics_html}</div>
+</div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            for direction in getattr(novelty_analysis, "novelty_directions", []) or []:
+                direction_title = html.escape(direction.direction)
+                why_promising = html.escape(direction.why_promising)
+                how_to_extend = html.escape(direction.how_to_extend)
+                expected_contribution = html.escape(direction.expected_contribution)
+
+                st.markdown(
+                    f"""
+<div class="novelty-card">
+    <div class="novelty-card-title">{direction_title}</div>
+    <div class="novelty-field">
+        <div class="novelty-label">Why promising</div>
+        <div class="novelty-text">{why_promising}</div>
+    </div>
+    <div class="novelty-field">
+        <div class="novelty-label">How to extend</div>
+        <div class="novelty-text">{how_to_extend}</div>
+    </div>
+    <div class="novelty-field">
+        <div class="novelty-label">Expected contribution</div>
+        <div class="novelty-text">{expected_contribution}</div>
+    </div>
+</div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+    elif related_papers_status == "failed":
+        st.warning("Related-paper analysis failed in the previous run.")
+
+        if st.button("Retry Novelty Analysis"):
+            try:
+                with st.spinner("Retrying related papers and novelty directions..."):
+                    related_papers_result = cached_related_papers(
+                        report_text=report_text,
+                        limit=5,
+                    )
+                    st.session_state.related_papers_result = related_papers_result
+                    st.session_state.related_papers_status = "ready"
+                st.success("Novelty directions prepared successfully.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Retry failed: {e}")
+    else:
+        st.info("Novelty directions are prepared after related-paper analysis.")
+
+        if st.button("Run Novelty Analysis Now"):
+            try:
+                with st.spinner("Finding related papers and generating novelty directions..."):
+                    related_papers_result = cached_related_papers(
+                        report_text=report_text,
+                        limit=5,
+                    )
+                    st.session_state.related_papers_result = related_papers_result
+                    st.session_state.related_papers_status = "ready"
+                st.success("Novelty directions prepared successfully.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Novelty analysis failed: {e}")
+
 # Chatbot page
 elif page == "Chatbot":
     st.markdown(
@@ -544,8 +718,8 @@ elif page == "Chatbot":
     <div class="chat-header">
         <div>
             <div class="chat-kicker">Paper Chatbot</div>
-            <div class="chat-title">Ask about the submission and evaluation</div>
-            <div class="chat-subtitle">Grounded in the uploaded paper chunks, rubric results, and related-paper analysis.</div>
+            <div class="chat-title">Ask about the submission</div>
+            <div class="chat-subtitle">Answers are grounded in the uploaded report, rubric results, and related-paper analysis.</div>
         </div>
     </div>
 </div>
@@ -562,8 +736,21 @@ elif page == "Chatbot":
             transcript_parts.append(
                 """
 <div class="chat-empty">
-    <div class="chat-empty-title">No messages yet</div>
-    <div class="chat-empty-copy">Try asking for the paper title, whether it passed, what is missing, or which rubric item needs the most work.</div>
+    <div class="chat-row chat-row-assistant">
+        <div class="chat-bubble chat-bubble-assistant chat-bubble-intro">
+            <div class="chat-role">Auditor Assistant</div>
+            <div class="chat-text">Ask me about the submitted paper, rubric evidence, missing requirements, similarity results, or improvement ideas.</div>
+        </div>
+    </div>
+    <div class="chat-suggestion-panel">
+        <div class="chat-empty-title">Try one of these</div>
+        <div class="chat-suggestions">
+            <div class="chat-suggestion">What is the paper about?</div>
+            <div class="chat-suggestion">Which criteria need work?</div>
+            <div class="chat-suggestion">What evidence supports IMP-01?</div>
+            <div class="chat-suggestion">How can the submission improve?</div>
+        </div>
+    </div>
 </div>
                 """
             )
@@ -596,12 +783,15 @@ elif page == "Chatbot":
         st.markdown("".join(transcript_parts), unsafe_allow_html=True)
 
         with st.form("chatbot_question_form", clear_on_submit=True):
-            prompt = st.text_input(
-                "Ask about the submitted paper or evaluation",
-                placeholder="Ask about the submitted paper or evaluation",
-                label_visibility="collapsed",
-            )
-            submitted = st.form_submit_button("Send")
+            input_col, send_col = st.columns([7, 1])
+            with input_col:
+                prompt = st.text_input(
+                    "Ask about the submitted paper or evaluation",
+                    placeholder="Ask about the submitted paper, rubric results, or related papers",
+                    label_visibility="collapsed",
+                )
+            with send_col:
+                submitted = st.form_submit_button("Send")
 
         if submitted and prompt:
             user_message = HumanMessage(content=prompt)
@@ -627,3 +817,4 @@ elif page == "Chatbot":
 
             st.session_state.chat_messages.append(AIMessage(content=answer))
             st.rerun()
+

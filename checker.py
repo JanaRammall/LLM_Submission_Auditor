@@ -1,5 +1,6 @@
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, List, Dict
 
 from pydantic import ValidationError
@@ -240,8 +241,6 @@ def run_audit(
     available_artifacts: Dict[str, bool],
     model_name: Optional[str] = None,
 ) -> AuditReport:
-    llm = get_llm(model_name=model_name)
-
     active_results: List[CriterionResult] = []
     deferred_results: List[CriterionResult] = []
 
@@ -258,8 +257,28 @@ def run_audit(
         "REP-04", "REP-05"
     }]
 
-    active_results.extend(run_semantic_batch(llm, vector_store, impl_criteria, "Implementation"))
-    active_results.extend(run_semantic_batch(llm, vector_store, report_semantic, "Report Semantics"))
+    semantic_jobs = [
+        (impl_criteria, "Implementation"),
+        (report_semantic, "Report Semantics"),
+    ]
+    semantic_jobs = [(criteria, group_name) for criteria, group_name in semantic_jobs if criteria]
+
+    if semantic_jobs:
+        max_workers = min(2, len(semantic_jobs))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    run_semantic_batch,
+                    get_llm(model_name=model_name),
+                    vector_store,
+                    criteria,
+                    group_name,
+                ): group_name
+                for criteria, group_name in semantic_jobs
+            }
+
+            for future in as_completed(futures):
+                active_results.extend(future.result())
 
     # preserve compact rubric order
     order_map = {c.criterion_id: i for i, c in enumerate(compiled_rubric.criteria)}
