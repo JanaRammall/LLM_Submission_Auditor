@@ -13,3 +13,10 @@ def extract_text_from_pdf(uploaded_file) -> str:
         pages.append(f"\n--- PAGE {i} ---\n{text}")
 
     return "\n".join(pages)
+
+
+def extract_text_from_text_file(uploaded_file) -> str:
+    raw = uploaded_file.read()
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", errors="ignore")
+    return str(raw)

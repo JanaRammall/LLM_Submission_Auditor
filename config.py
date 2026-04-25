@@ -17,7 +17,7 @@ class Settings:
 
 
 def get_settings() -> Settings:
-    api_key = "AIzaSyB6Eg4Ug04TgQEYAjE1-JqA14v07UgTKJ4"
+    api_key = "AIzaSyDD1FhEvTF8pEJoYQOGl105v5z4jZYSpc4"
     if not api_key:
         raise ValueError("GOOGLE_API_KEY is missing. Add it to your .env file.")
     return Settings(google_api_key=api_key)

@@ -6,3 +6,4 @@ tenacity
 langchain-google-genai
 langchain-chroma
 langchain-text-splitters
+requests

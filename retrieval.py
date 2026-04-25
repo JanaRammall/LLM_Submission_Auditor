@@ -1,4 +1,3 @@
-import hashlib
 import os
 from typing import List, Tuple
 
@@ -10,11 +9,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from config import get_settings
 
 
-def _doc_hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-
-
-def _chunk_documents(text: str) -> List[Document]:
+def chunk_artifact_text(text: str, artifact_type: str, source_name: str, chunk_prefix: str) -> List[Document]:
     settings = get_settings()
 
     splitter = RecursiveCharacterTextSplitter(
@@ -30,16 +25,19 @@ def _chunk_documents(text: str) -> List[Document]:
         docs.append(
             Document(
                 page_content=chunk,
-                metadata={"chunk_id": f"C{idx:03d}"}
+                metadata={
+                    "chunk_id": f"{chunk_prefix}{idx:03d}",
+                    "artifact_type": artifact_type,
+                    "source_name": source_name,
+                }
             )
         )
     return docs
 
 
-def build_or_load_vector_store(text: str) -> Tuple[Chroma, str]:
+def build_or_load_vector_store_from_docs(docs: List[Document], store_key: str) -> Tuple[Chroma, str]:
     settings = get_settings()
-    doc_id = _doc_hash(text)
-    persist_dir = os.path.join(settings.vector_db_dir, doc_id)
+    persist_dir = os.path.join(settings.vector_db_dir, store_key)
 
     embeddings = GoogleGenerativeAIEmbeddings(
         model=settings.embedding_model,
@@ -52,10 +50,9 @@ def build_or_load_vector_store(text: str) -> Tuple[Chroma, str]:
             embedding_function=embeddings,
             persist_directory=persist_dir
         )
-        return vector_store, doc_id
+        return vector_store, store_key
 
     os.makedirs(persist_dir, exist_ok=True)
-    docs = _chunk_documents(text)
 
     vector_store = Chroma.from_documents(
         documents=docs,
@@ -63,9 +60,9 @@ def build_or_load_vector_store(text: str) -> Tuple[Chroma, str]:
         collection_name="submission_chunks",
         persist_directory=persist_dir
     )
-    return vector_store, doc_id
+    return vector_store, store_key
 
 
-def retrieve_evidence(vector_store: Chroma, query: str, k: int | None = None) -> List[Document]:
+def retrieve_evidence(vector_store: Chroma, query: str, k: int | None = None):
     settings = get_settings()
     return vector_store.similarity_search(query=query, k=k or settings.retrieval_k)
