@@ -106,7 +106,7 @@ def search_semantic_scholar(query: str, limit: int = 5) -> List[dict]:
     Works with or without S2_API_KEY.
     Retries on 429 with backoff and respects low rate limits.
     """
-    api_key = "s2k-Iwq4sX1o0K1F2BFKPpqugMcO7FfSJEnOuXuqiI8e"
+    api_key = ""
     logger.info("Semantic Scholar key loaded: %s", bool(api_key))
     headers = {}
     if api_key:

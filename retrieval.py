@@ -63,6 +63,22 @@ def build_or_load_vector_store_from_docs(docs: List[Document], store_key: str) -
     return vector_store, store_key
 
 
+def load_vector_store(store_id: str) -> Chroma:
+    settings = get_settings()
+    persist_dir = os.path.join(settings.vector_db_dir, store_id)
+
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model=settings.embedding_model,
+        google_api_key=settings.google_api_key
+    )
+
+    return Chroma(
+        collection_name="submission_chunks",
+        embedding_function=embeddings,
+        persist_directory=persist_dir
+    )
+
+
 def retrieve_evidence(vector_store: Chroma, query: str, k: int | None = None):
     settings = get_settings()
     return vector_store.similarity_search(query=query, k=k or settings.retrieval_k)
