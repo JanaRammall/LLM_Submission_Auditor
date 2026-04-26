@@ -20,7 +20,7 @@ from services.analysis_pipeline import (
 )
 from services.chat_service import answer_chat_question, serialize_audit_context
 from utils.formatting import format_ai_content, format_chat_html
-
+from detection.ai_detector import detect_ai
 
 def render_submission_page(compiled, related_papers_status, model_name: str) -> None:
     st.markdown('<div class="section-title">Upload Submission</div>', unsafe_allow_html=True)
@@ -502,7 +502,127 @@ def render_chatbot_page(
     render_chat_transcript()
     render_chat_input(compiled, audit_report, report_features, related_papers_result, model_name)
 
+## AI Detector Page
+def render_ai_detected_page() -> None:
+    st.markdown(
+        '<div class="section-title">AI Detection</div>',
+        unsafe_allow_html=True
+    )
 
+    if not st.session_state.get("store_id"):
+        st.info("Run Submission Analysis first.")
+        return
+
+    st.caption(
+        "This tool estimates whether the writing style appears human-written "
+        "or AI-generated based on linguistic patterns."
+    )
+
+    if st.button("Run AI Detection"):
+
+        with st.spinner("Analyzing document..."):
+
+            try:
+                # Load Chroma DB
+                db = load_vector_store(
+                    st.session_state.store_id
+                )
+
+                # Run detector
+                result = detect_ai(db)
+
+                # Extract score + label
+                lines = result.split("\n")
+
+                score = 0.0
+                label = "Unknown"
+
+                for line in lines:
+
+                    if "AI Probability:" in line:
+                        score = float(
+                            line.split(":")[1]
+                            .replace("%", "")
+                            .strip()
+                        )
+
+                    if "Assessment" in line:
+                        label = line.split(":")[1].strip()
+
+                # Color based on score
+                if score < 35:
+                    color = "#22c55e"   # green
+
+                elif score < 65:
+                    color = "#eab308"   # yellow
+
+                else:
+                    color = "#ef4444"   # red
+
+                # =====================
+                # RESULT UI
+                # =====================
+
+                st.markdown("## AI Detection Result")
+
+                # Percentage
+                st.markdown(
+                    f"""
+                    <h1 style='
+                        text-align:center;
+                        font-size:72px;
+                        margin-bottom:10px;
+                        color:white;
+                    '>
+                        {score:.1f}%
+                    </h1>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                # Label
+                st.markdown(
+                    f"""
+                    <p style='
+                        text-align:center;
+                        font-size:24px;
+                        color:{color};
+                        font-weight:700;
+                        margin-top:-10px;
+                        margin-bottom:25px;
+                    '>
+                        {label}
+                    </p>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                # Bar title
+                st.markdown("### Detection Probability")
+
+                # Bar
+                st.progress(int(score))
+
+                st.write("")
+
+                # Final sentence
+                if score < 35:
+                    st.success(
+                        "This document appears mostly human-written."
+                    )
+
+                elif score < 65:
+                    st.warning(
+                        "This document may contain AI-assisted writing."
+                    )
+
+                else:
+                    st.error(
+                        "This document strongly resembles AI-generated writing."
+                    )
+
+            except Exception as e:
+                st.error(f"Detection failed: {e}")
 def render_chat_transcript() -> None:
     transcript_parts = ['<div class="chat-transcript">']
 

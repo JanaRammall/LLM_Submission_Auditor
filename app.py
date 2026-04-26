@@ -18,12 +18,13 @@ from ui.pages import (
     render_novelty_page,
     render_similarity_page,
     render_submission_page,
+    render_ai_detected_page, 
 )
 
 load_dotenv()
 
 MODEL_NAME = "gemini-2.5-flash"
-NAV_ITEMS = ["Submission", "Evaluation", "Similarity Check", "Novelty Directions", "Chatbot"]
+NAV_ITEMS = ["Submission", "Evaluation", "Similarity Check", "Novelty Directions", "Chatbot","AI Detector"]
 
 st.set_page_config(page_title="LLM Submission Auditor", layout="wide")
 
@@ -51,6 +52,7 @@ def init_session_state() -> None:
         "analysis_duration_seconds": None,
         "similarity_completed": False,
         "submission_notice": "",
+        "ai_detected_result": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -133,6 +135,9 @@ def main() -> None:
             related_papers_result=related_papers_result,
             report_text=report_text,
             model_name=MODEL_NAME,
+        )
+    elif page == "AI Detector":   # NEW PAGE LOGIC
+        render_ai_detected_page(
         )
 
 
