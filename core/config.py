@@ -1,9 +1,16 @@
+"""Application settings loaded from the project-root .env file.
+
+Most modules should call get_settings() instead of reading environment
+variables directly. That keeps API-key aliases, model names, chunk sizes, and
+retrieval defaults in one place.
+"""
+
 from dataclasses import dataclass
 import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parents[1]
 ENV_PATH = BASE_DIR / ".env"
 
 load_dotenv(dotenv_path=ENV_PATH)

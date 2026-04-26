@@ -1,3 +1,9 @@
+"""Deterministic text checks for report structure, references, and recency.
+
+These checks are intentionally model-free. They give fast, explainable signals
+for report quality and feed the deterministic rubric criteria in audit.checker.
+"""
+
 import re
 from typing import Dict, List
 

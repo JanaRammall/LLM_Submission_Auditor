@@ -1,4 +1,15 @@
-import json
+"""Find related academic papers and suggest novelty directions for a report.
+
+Pipeline:
+1. Extract an academic search basis from the submitted report.
+2. Query Semantic Scholar for candidate papers.
+3. Remove self-matches and duplicate papers.
+4. Compare candidate title/abstract embeddings against report chunks.
+5. Explain semantic relatedness and generate novelty directions.
+
+The score is semantic relatedness, not plagiarism detection.
+"""
+
 import logging
 import math
 import re
@@ -7,11 +18,11 @@ from typing import List, Optional
 
 import requests
 from pydantic import BaseModel, Field
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from config import get_settings
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from core.config import get_settings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from services.llm import get_embeddings, get_llm, invoke_with_retry
+from utils.json_utils import safe_json_load
 
 
 logging.basicConfig(level=logging.INFO)
@@ -52,45 +63,6 @@ class RelatedPaperSearchResult(BaseModel):
     novelty_analysis: Optional[NoveltyAnalysis] = None
 
 
-def get_llm(model_name: Optional[str] = None) -> ChatGoogleGenerativeAI:
-    settings = get_settings()
-    return ChatGoogleGenerativeAI(
-        model=model_name or settings.chat_model,
-        api_key=settings.google_api_key,
-        temperature=0.0,
-    )
-
-
-def get_embeddings() -> GoogleGenerativeAIEmbeddings:
-    settings = get_settings()
-    return GoogleGenerativeAIEmbeddings(
-        model=settings.embedding_model,
-        google_api_key=settings.google_api_key,
-    )
-
-
-@retry(
-    stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=2, min=2, max=20),
-    retry=retry_if_exception_type(Exception),
-    reraise=True,
-)
-def _invoke(llm: ChatGoogleGenerativeAI, prompt: str):
-    return llm.invoke(prompt)
-
-
-def _safe_json_load(text: str) -> dict:
-    text = text.strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            return json.loads(text[start:end + 1])
-        raise ValueError("Model did not return valid JSON.")
-
-
 def build_query_extraction_prompt(report_text: str) -> str:
     return f"""
 You are helping extract a search query for related academic papers.
@@ -126,8 +98,8 @@ Report text:
 def extract_paper_query(report_text: str, model_name: Optional[str] = None) -> dict:
     llm = get_llm(model_name=model_name)
     prompt = build_query_extraction_prompt(report_text)
-    response = _invoke(llm, prompt)
-    return _safe_json_load(response.content)
+    response = invoke_with_retry(llm, prompt)
+    return safe_json_load(response.content)
 
 
 def search_semantic_scholar(query: str, limit: int = 8) -> List[dict]:
@@ -450,8 +422,8 @@ def explain_related_papers(
 
     llm = get_llm(model_name=model_name)
     prompt = build_similarity_explanation_prompt(project_title, short_summary, scored_papers)
-    response = _invoke(llm, prompt)
-    parsed = _safe_json_load(response.content)
+    response = invoke_with_retry(llm, prompt)
+    parsed = safe_json_load(response.content)
 
     reasons_by_title = {
         (item.get("title") or "").strip().lower(): item.get("similarity_reason", "")
@@ -538,8 +510,8 @@ def generate_novelty_directions(
 
     llm = get_llm(model_name=model_name)
     prompt = build_novelty_prompt(project_title, short_summary, related_papers)
-    response = _invoke(llm, prompt)
-    parsed = _safe_json_load(response.content)
+    response = invoke_with_retry(llm, prompt)
+    parsed = safe_json_load(response.content)
 
     try:
         return NoveltyAnalysis(**parsed)
@@ -584,6 +556,12 @@ def get_related_papers_from_report(
     limit: int = 5,
     model_name: Optional[str] = None,
 ) -> RelatedPaperSearchResult:
+    """Build the complete related-paper and novelty analysis for one report.
+
+    This is intentionally an advisory workflow. The result highlights papers
+    that are semantically related to the submitted report and suggests possible
+    novelty directions based only on the retrieved candidate papers.
+    """
     extracted = extract_paper_query(report_text, model_name=model_name)
 
     project_title = extracted.get("project_title", "Unknown Project")

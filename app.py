@@ -1,143 +1,31 @@
-import hashlib
+﻿"""Streamlit entry point and top-level page router.
+
+Workflow:
+1. Load environment variables and CSS.
+2. Initialize Streamlit session-state slots used across tabs.
+3. Render the shared header/navigation.
+4. Delegate each tab to ui.pages so this file stay minimal.
+"""
+
 from pathlib import Path
-import html
 
 import streamlit as st
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from checker import get_llm, run_audit
-from retrieval import chunk_artifact_text, build_or_load_vector_store_from_docs, load_vector_store, retrieve_evidence
-from rubric_compiler import compile_rubric
-from report_analyzer import build_report_features
-from compact_rubric import build_compact_rubric
-from related_papers import get_related_papers_from_report
+from ui.pages import (
+    render_chatbot_page,
+    render_evaluation_page,
+    render_novelty_page,
+    render_similarity_page,
+    render_submission_page,
+)
 
 load_dotenv()
 
 MODEL_NAME = "gemini-2.5-flash"
+NAV_ITEMS = ["Submission", "Evaluation", "Similarity Check", "Novelty Directions", "Chatbot"]
 
 st.set_page_config(page_title="LLM Submission Auditor", layout="wide")
-
-
-def shorten_text(text: str, max_len: int = 180) -> str:
-    if not text:
-        return "None"
-    text = " ".join(text.split())
-    return text if len(text) <= max_len else text[: max_len - 3] + "..."
-
-
-def format_ai_content(content) -> str:
-    if isinstance(content, str):
-        return content
-
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, dict) and "text" in item:
-                parts.append(str(item["text"]))
-            elif isinstance(item, str):
-                parts.append(item)
-        return "\n".join(part for part in parts if part)
-
-    return str(content)
-
-
-def format_chat_html(text: str) -> str:
-    return html.escape(text or "").replace("\n", "<br>")
-
-
-def serialize_audit_context(compiled_rubric, audit_report, report_features, related_papers_result) -> str:
-    blocks = []
-
-    if compiled_rubric:
-        blocks.append(f"Project title: {compiled_rubric.project_title}")
-        blocks.append(
-            "Rubric criteria:\n"
-            + "\n".join(
-                f"- {criterion.criterion_id}: {criterion.title} | {criterion.description}"
-                for criterion in compiled_rubric.criteria
-            )
-        )
-
-    if report_features:
-        blocks.append(f"Deterministic report features: {report_features}")
-
-    if audit_report:
-        results = []
-        for result in audit_report.active_results:
-            results.append(
-                "\n".join(
-                    [
-                        f"- {result.criterion_id}: {result.status}",
-                        f"  Evidence: {result.evidence_found or 'None'}",
-                        f"  Missing or weak: {result.missing_or_weak or 'None'}",
-                        f"  Improvement: {result.improvement or 'None'}",
-                        f"  Evidence chunks: {', '.join(result.evidence_chunk_ids) if result.evidence_chunk_ids else 'None'}",
-                    ]
-                )
-            )
-        blocks.append("Evaluation results:\n" + "\n".join(results))
-
-    if related_papers_result:
-        papers = []
-        for paper in related_papers_result.papers[:5]:
-            papers.append(
-                f"- {paper.title or 'Untitled'} ({paper.year or 'N/A'}, {paper.venue or 'N/A'}): "
-                f"{paper.similarity_reason or 'No similarity reason available.'}"
-            )
-        blocks.append("Related papers:\n" + ("\n".join(papers) if papers else "None found."))
-
-    return "\n\n".join(blocks)
-
-
-def serialize_retrieved_docs(docs) -> str:
-    blocks = []
-    for doc in docs:
-        chunk_id = doc.metadata.get("chunk_id", "UNKNOWN")
-        source = doc.metadata.get("source_name", "unknown")
-        blocks.append(f"[{chunk_id}] [source={source}]\n{doc.page_content}")
-    return "\n\n".join(blocks)
-
-
-def answer_chat_question(prompt: str, chat_history: list, vector_store, app_context: str) -> str:
-    docs = retrieve_evidence(vector_store, query=prompt, k=5)
-    paper_context = serialize_retrieved_docs(docs)
-
-    history_lines = []
-    for message in chat_history[-8:]:
-        role = "User" if isinstance(message, HumanMessage) else "Assistant"
-        history_lines.append(f"{role}: {format_ai_content(message.content)}")
-
-    messages = [
-        SystemMessage(
-            content=(
-                "You are a careful assistant for a university submission audit app. "
-                "Answer questions about the submitted paper and the evaluation results. "
-                "Use only the provided paper chunks, rubric, evaluation, deterministic features, "
-                "and related-paper context. If the answer is not supported by that context, say so. "
-                "When useful, cite chunk IDs or criterion IDs."
-            )
-        ),
-        HumanMessage(
-            content=f"""
-Conversation so far:
-{chr(10).join(history_lines) if history_lines else "No previous messages."}
-
-Current user question:
-{prompt}
-
-Relevant submitted-paper chunks:
-{paper_context or "No matching chunks were found."}
-
-Evaluation and app context:
-{app_context or "No evaluation context is available."}
-"""
-        ),
-    ]
-
-    response = get_llm(model_name=MODEL_NAME).invoke(messages)
-    return format_ai_content(response.content)
 
 
 def load_css(file_name: str = "styles.css") -> None:
@@ -149,130 +37,29 @@ def load_css(file_name: str = "styles.css") -> None:
         )
 
 
-@st.cache_data(show_spinner=False)
-def cached_compile_rubric(instructions_text: str):
-    return compile_rubric(instructions_text, model_name=MODEL_NAME)
-
-
-@st.cache_data(show_spinner=False)
-def cached_report_features(report_text: str):
-    return build_report_features(report_text)
-
-
-@st.cache_data(show_spinner=False)
-def cached_pdf_text(file_bytes: bytes, kind: str) -> str:
-    from io import BytesIO
-    from pypdf import PdfReader
-
-    reader = PdfReader(BytesIO(file_bytes))
-    pages = []
-    for i, page in enumerate(reader.pages, start=1):
-        text = page.extract_text() or ""
-        pages.append(f"\n--- PAGE {i} ---\n{text}")
-    return "\n".join(pages)
-
-
-@st.cache_data(show_spinner=False)
-def cached_related_papers(report_text: str, limit: int = 5, pipeline_version: str = "semantic-v5"):
-    return get_related_papers_from_report(
-        report_text=report_text,
-        limit=limit,
-        model_name=MODEL_NAME,
-    )
-
-
-load_css()
-
-defaults = {
-    "compiled_rubric": None,
-    "audit_report": None,
-    "report_features": None,
-    "store_id": None,
-    "related_papers_result": None,
-    "related_papers_status": None,
-    "report_text": None,
-    "chat_messages": [],
-}
-for key, value in defaults.items():
-    if key not in st.session_state:
-        st.session_state[key] = value
-
-
-def run_full_analysis(uploaded_instructions, uploaded_report):
-    st.session_state.related_papers_result = None
-    st.session_state.related_papers_status = None
-    st.session_state.chat_messages = []
-
-    with st.spinner("Extracting instructions text..."):
-        instructions_text = cached_pdf_text(uploaded_instructions.getvalue(), "instructions")
-
-    with st.spinner("Compiling rubric..."):
-        full_rubric = cached_compile_rubric(instructions_text)
-        compact_rubric = build_compact_rubric(full_rubric)
-        st.session_state.compiled_rubric = compact_rubric
-
-    with st.spinner("Extracting report text..."):
-        report_text = cached_pdf_text(uploaded_report.getvalue(), "report")
-        st.session_state.report_text = report_text
-
-    with st.spinner("Running deterministic report analysis..."):
-        report_features = cached_report_features(report_text)
-        st.session_state.report_features = report_features
-
-    with st.spinner("Building/loading vector store..."):
-        docs = chunk_artifact_text(
-            text=report_text,
-            artifact_type="report",
-            source_name=uploaded_report.name,
-            chunk_prefix="R",
-        )
-
-        store_key_input = uploaded_report.name + report_text[:5000]
-        store_key = hashlib.sha256(store_key_input.encode("utf-8")).hexdigest()[:16]
-        vector_store, store_id = build_or_load_vector_store_from_docs(docs, store_key)
-        st.session_state.store_id = store_id
-
-    available_artifacts = {
-        "report": True,
-        "readme": False,
-        "code": False,
-        "slides": False,
+def init_session_state() -> None:
+    defaults = {
+        "compiled_rubric": None,
+        "audit_report": None,
+        "report_features": None,
+        "store_id": None,
+        "related_papers_result": None,
+        "related_papers_status": None,
+        "report_text": None,
+        "chat_messages": [],
+        "analysis_completed": False,
+        "analysis_duration_seconds": None,
+        "similarity_completed": False,
+        "submission_notice": "",
     }
-
-    with st.spinner("Running evaluation..."):
-        audit_report = run_audit(
-            compiled_rubric=st.session_state.compiled_rubric,
-            vector_store=vector_store,
-            report_features=report_features,
-            available_artifacts=available_artifacts,
-            model_name=MODEL_NAME,
-        )
-        st.session_state.audit_report = audit_report
-
-    with st.spinner("Preparing related papers..."):
-        try:
-            related_papers_result = cached_related_papers(
-                report_text=report_text,
-                limit=5,
-            )
-            st.session_state.related_papers_result = related_papers_result
-            st.session_state.related_papers_status = "ready"
-        except Exception as e:
-            st.session_state.related_papers_result = None
-            st.session_state.related_papers_status = "failed"
-            st.warning(f"Evaluation finished, but related papers could not be prepared now: {e}")
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
 
-compiled = st.session_state.compiled_rubric
-audit_report = st.session_state.audit_report
-report_features = st.session_state.report_features
-related_papers_result = st.session_state.related_papers_result
-related_papers_status = st.session_state.related_papers_status
-report_text = st.session_state.report_text
-
-# Header
-st.markdown(
-    """
+def render_header() -> None:
+    st.markdown(
+        """
     <div class="hero-card">
         <div class="hero-kicker">Specialized LLM Agent</div>
         <div class="hero-title">LLM Submission Auditor</div>
@@ -280,541 +67,73 @@ st.markdown(
             Analyze a student submission against project requirements and prepare related-paper similarity results.
         </div>
     </div>
-    """,
-    unsafe_allow_html=True,
-)
+        """,
+        unsafe_allow_html=True,
+    )
 
-# Navbar
-st.markdown('<div class="top-nav-wrap">', unsafe_allow_html=True)
-page = st.radio(
-    "Navigation",
-    ["Submission", "Evaluation", "Similarity Check", "Novelty Directions", "Chatbot"],
-    horizontal=True,
-    label_visibility="collapsed",
-    key="top_nav_page",
-)
-st.markdown("</div>", unsafe_allow_html=True)
 
-# =========================
-# Submission Page
-# =========================
-if page == "Submission":
-    st.markdown('<div class="section-title">Upload Submission</div>', unsafe_allow_html=True)
+def render_nav() -> str:
+    st.markdown('<div class="top-nav-wrap">', unsafe_allow_html=True)
+    page = st.radio(
+        "Navigation",
+        NAV_ITEMS,
+        horizontal=True,
+        label_visibility="collapsed",
+        key="top_nav_page",
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+    return page
 
-    if compiled:
-        criteria_count = len(compiled.criteria)
-        store_id = html.escape(st.session_state.get("store_id", "N/A") or "N/A")
-        project_title = html.escape(compiled.project_title)
-        related_status = html.escape(related_papers_status or "not ready")
 
-        st.markdown(
-            f"""
-<div class="submission-status">
-    <div>
-        <div class="submission-kicker">Current analysis</div>
-        <div class="submission-title">{project_title}</div>
-        <div class="submission-meta">Criteria: {criteria_count} &nbsp;|&nbsp; Vector store: {store_id} &nbsp;|&nbsp; Related papers: {related_status}</div>
-    </div>
-</div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.caption("Upload new files and click Run Analysis to replace the current analysis.")
+def main() -> None:
+    load_css()
+    init_session_state()
 
-    upload_col1, upload_col2 = st.columns(2)
-    with upload_col1:
-        uploaded_instructions = st.file_uploader(
-            "Project instructions / rubric PDF",
-            type=["pdf"],
-            key="instructions_uploader",
-        )
-
-    with upload_col2:
-        uploaded_report = st.file_uploader(
-            "Student report PDF",
-            type=["pdf"],
-            key="report_uploader",
-        )
-
-    run_clicked = st.button("Run Analysis")
-
-    if uploaded_instructions is not None and uploaded_report is not None and run_clicked:
-        try:
-            run_full_analysis(uploaded_instructions, uploaded_report)
-            st.success("Analysis completed. Open the Evaluation tab to review the results.")
-        except Exception as e:
-            st.error(f"Process failed: {e}")
-
-# =========================
-# Evaluation Page
-# =========================
-elif page == "Evaluation":
     compiled = st.session_state.compiled_rubric
     audit_report = st.session_state.audit_report
     report_features = st.session_state.report_features
     related_papers_result = st.session_state.related_papers_result
     related_papers_status = st.session_state.related_papers_status
+    report_text = st.session_state.report_text
 
-    if not compiled and not audit_report and not report_features:
-        st.info("Run analysis from the Submission tab first.")
+    render_header()
+    page = render_nav()
 
-    if compiled:
-        st.markdown('<div class="section-title">Compact Rubric</div>', unsafe_allow_html=True)
-        st.caption(f"Criteria used: {len(compiled.criteria)}")
-
-        with st.expander("View compact criteria", expanded=False):
-            for criterion in compiled.criteria:
-                st.markdown(f"**{criterion.criterion_id} - {criterion.title}**")
-                st.write(criterion.description)
-                st.divider()
-
-    if report_features:
-        st.markdown('<div class="section-title">Deterministic Report Analysis</div>', unsafe_allow_html=True)
-
-        sections = report_features.get("sections", {})
-        detected_sections = [name for name, present in sections.items() if present]
-        missing_sections = [name for name, present in sections.items() if not present]
-        reference_years = report_features.get("reference_years_found", [])
-        recent_refs = report_features.get("recent_reference_count_2025_2026", 0)
-        reference_count = report_features.get("reference_count", 0)
-        page_count = report_features.get("page_count", 0)
-        has_references = report_features.get("has_references_block", False)
-
-        section_items_html = "".join(
-            f'<span class="analysis-chip analysis-chip-pass">{html.escape(name.title())}</span>'
-            for name in detected_sections
-        ) or '<span class="analysis-chip analysis-chip-muted">No sections detected</span>'
-
-        missing_items_html = "".join(
-            f'<span class="analysis-chip analysis-chip-warn">{html.escape(name.title())}</span>'
-            for name in missing_sections
-        ) or '<span class="analysis-chip analysis-chip-pass">No missing sections</span>'
-
-        unique_years = sorted(set(reference_years), reverse=True)[:12]
-        years_html = "".join(
-            f'<span class="analysis-chip">{year}</span>'
-            for year in unique_years
-        ) or '<span class="analysis-chip analysis-chip-muted">No years found</span>'
-
-        references_status = "Detected" if has_references else "Not detected"
-
-        st.markdown(
-            f"""
-<div class="analysis-panel">
-    <div class="analysis-metric-grid">
-        <div class="analysis-metric">
-            <div class="analysis-metric-label">Estimated pages</div>
-            <div class="analysis-metric-value">{page_count}</div>
-        </div>
-        <div class="analysis-metric">
-            <div class="analysis-metric-label">References</div>
-            <div class="analysis-metric-value">{reference_count}</div>
-        </div>
-        <div class="analysis-metric">
-            <div class="analysis-metric-label">Recent refs 2025-2026</div>
-            <div class="analysis-metric-value">{recent_refs}</div>
-        </div>
-        <div class="analysis-metric">
-            <div class="analysis-metric-label">References block</div>
-            <div class="analysis-metric-value analysis-metric-text">{references_status}</div>
-        </div>
-    </div>
-    <div class="analysis-section">
-        <div class="analysis-label">Detected sections</div>
-        <div class="analysis-chip-row">{section_items_html}</div>
-    </div>
-    <div class="analysis-section">
-        <div class="analysis-label">Missing / not detected</div>
-        <div class="analysis-chip-row">{missing_items_html}</div>
-    </div>
-    <div class="analysis-section">
-        <div class="analysis-label">Reference years found</div>
-        <div class="analysis-chip-row">{years_html}</div>
-    </div>
-</div>
-            """,
-            unsafe_allow_html=True,
+    if page == "Submission":
+        render_submission_page(
+            compiled=compiled,
+            related_papers_status=related_papers_status,
+            model_name=MODEL_NAME,
+        )
+    elif page == "Evaluation":
+        render_evaluation_page(
+            compiled=compiled,
+            audit_report=audit_report,
+            report_features=report_features,
+        )
+    elif page == "Similarity Check":
+        render_similarity_page(
+            report_text=report_text,
+            related_papers_status=related_papers_status,
+            related_papers_result=related_papers_result,
+            model_name=MODEL_NAME,
+        )
+    elif page == "Novelty Directions":
+        render_novelty_page(
+            report_text=report_text,
+            related_papers_status=related_papers_status,
+            related_papers_result=related_papers_result,
+            model_name=MODEL_NAME,
+        )
+    elif page == "Chatbot":
+        render_chatbot_page(
+            compiled=compiled,
+            audit_report=audit_report,
+            report_features=report_features,
+            related_papers_result=related_papers_result,
+            report_text=report_text,
+            model_name=MODEL_NAME,
         )
 
-        with st.expander("View raw analysis data", expanded=False):
-            st.json(report_features)
 
-    if audit_report:
-        st.markdown('<div class="section-title">Evaluation Summary</div>', unsafe_allow_html=True)
-
-        pass_count = sum(1 for r in audit_report.active_results if r.status == "Pass")
-        partial_count = sum(1 for r in audit_report.active_results if r.status == "Partial")
-        fail_count = sum(1 for r in audit_report.active_results if r.status == "Fail")
-        unknown_count = sum(1 for r in audit_report.active_results if r.status == "Not enough evidence")
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Pass", pass_count)
-        c2.metric("Partial", partial_count)
-        c3.metric("Fail", fail_count)
-        c4.metric("Not enough evidence", unknown_count)
-
-        st.caption(f"Vector store ID: {st.session_state.get('store_id', 'N/A')}")
-        st.divider()
-
-        criteria_map = {c.criterion_id: c for c in compiled.criteria} if compiled else {}
-
-        for item in audit_report.active_results:
-            criterion = criteria_map.get(item.criterion_id)
-            title = criterion.title if criterion else item.criterion_id
-
-            status_class = {
-                "Pass": "status-pass",
-                "Partial": "status-partial",
-                "Fail": "status-fail",
-                "Not enough evidence": "status-unknown",
-            }[item.status]
-
-            full_evidence = html.escape(item.evidence_found or "None")
-            full_missing = html.escape(item.missing_or_weak or "None")
-            full_improvement = html.escape(item.improvement or "None")
-            chunk_ids = html.escape(", ".join(item.evidence_chunk_ids) if item.evidence_chunk_ids else "None")
-            safe_title = html.escape(title)
-            safe_status = html.escape(item.status)
-            safe_criterion_id = html.escape(item.criterion_id)
-
-            card_html = (
-                '<details class="eval-card eval-details">'
-                '<summary class="eval-summary">'
-                '<div class="eval-card-header">'
-                '<div class="eval-heading">'
-                f'<div class="eval-card-id">{safe_criterion_id}</div>'
-                f'<div class="eval-card-title">{safe_title}</div>'
-                '</div>'
-                f'<div class="status-pill {status_class}">{safe_status}</div>'
-                '</div>'
-                '<div class="eval-label">Evidence</div>'
-                f'<div class="eval-preview">{full_evidence}</div>'
-                '<div class="eval-label">Improvement</div>'
-                f'<div class="eval-preview">{full_improvement}</div>'
-                '</summary>'
-                '<div class="eval-full">'
-                f'<p><strong>Missing / weak:</strong> {full_missing}</p>'
-                f'<p><strong>Evidence chunk IDs:</strong> {chunk_ids}</p>'
-                '</div>'
-                '</details>'
-            )
-            st.markdown(card_html, unsafe_allow_html=True)
-
-# Similarity page
-elif page == "Similarity Check":
-    st.markdown('<div class="section-title">Similarity Check</div>', unsafe_allow_html=True)
-
-    if not report_text:
-        st.info("Run the analysis first so the system can save the report and prepare related papers.")
-    else:
-        if related_papers_status == "ready" and related_papers_result:
-            query_title = html.escape(related_papers_result.query_title or "Submitted Project")
-            query_summary = html.escape(related_papers_result.query_summary or "No summary available.")
-
-            st.markdown(
-                f"""
-<div class="paper-query-panel">
-    <div>
-        <div class="paper-query-label">Search Basis</div>
-        <div class="paper-query-title">{query_title}</div>
-        <div class="paper-query-summary">{query_summary}</div>
-    </div>
-    <div class="paper-query-count">{len(related_papers_result.papers)} papers</div>
-</div>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.caption(
-                "This score measures semantic relatedness between the submitted report and candidate academic papers. "
-                "It is not a plagiarism score."
-            )
-
-            if not related_papers_result.papers:
-                st.info("No strong related papers were found.")
-            else:
-                st.markdown('<div class="paper-list">', unsafe_allow_html=True)
-                for paper in related_papers_result.papers:
-                    title = html.escape(paper.title or "Untitled Paper")
-                    year = html.escape(str(paper.year) if paper.year else "N/A")
-                    venue = html.escape(paper.venue or "N/A")
-                    authors = html.escape(", ".join(paper.authors) if paper.authors else "N/A")
-                    reason = html.escape(paper.similarity_reason or "No similarity reason available.")
-                    abstract = html.escape(paper.abstract or "No abstract available.")
-                    url = paper.url or ""
-                    score = html.escape(f"{getattr(paper, 'similarity_score', 0.0):.1f}")
-                    confidence = html.escape(getattr(paper, "confidence", "Medium"))
-                    matched_chunks = getattr(paper, "matched_report_chunks", []) or []
-                    matched_chunks_html = "".join(
-                        f'<div class="matched-chunk">{html.escape(chunk)}</div>'
-                        for chunk in matched_chunks
-                    ) or '<div class="matched-chunk">No matched chunks available.</div>'
-
-                    link_html = f'<a class="paper-link" href="{html.escape(url)}" target="_blank">Open paper</a>' if url else ""
-
-                    st.markdown(
-                        f"""
-<div class="paper-card paper-card-full">
-    <div class="paper-card-topline">
-        <span class="paper-year">{year}</span>
-        <span class="paper-venue">{venue}</span>
-        <span class="paper-score">Content Similarity: {score}%</span>
-        <span class="paper-confidence">Confidence: {confidence}</span>
-    </div>
-    <div class="paper-title">{title}</div>
-    <div class="paper-meta">{year} - {venue}</div>
-    <div class="paper-reason-label">Why it is similar</div>
-    <div class="paper-reason">{reason}</div>
-    <div class="meta-pill-row">
-        <span class="meta-pill">Authors: {authors}</span>
-    </div>
-    <details class="paper-abstract-details">
-        <summary>Abstract</summary>
-        <div class="paper-abstract">{abstract}</div>
-    </details>
-    <details class="paper-abstract-details">
-        <summary>Matched report chunks</summary>
-        <div class="matched-chunks">{matched_chunks_html}</div>
-    </details>
-    <div class="link-line">{link_html}</div>
-</div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-                st.markdown("</div>", unsafe_allow_html=True)
-
-        elif related_papers_status == "failed":
-            st.warning("Related papers were not prepared successfully in the previous run.")
-
-            if st.button("Retry Similarity Check"):
-                try:
-                    with st.spinner("Retrying related paper retrieval..."):
-                        related_papers_result = cached_related_papers(
-                            report_text=report_text,
-                            limit=5,
-                        )
-                        st.session_state.related_papers_result = related_papers_result
-                        st.session_state.related_papers_status = "ready"
-                    st.success("Related papers retrieved successfully.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Retry failed: {e}")
-
-        else:
-            st.info("Related papers are not prepared yet.")
-
-            if st.button("Run Similarity Check Now"):
-                try:
-                    with st.spinner("Finding related papers..."):
-                        related_papers_result = cached_related_papers(
-                            report_text=report_text,
-                            limit=5,
-                        )
-                        st.session_state.related_papers_result = related_papers_result
-                        st.session_state.related_papers_status = "ready"
-                    st.success("Related papers retrieved successfully.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Similarity check failed: {e}")
-
-# Novelty directions page
-elif page == "Novelty Directions":
-    st.markdown('<div class="section-title">Novelty Direction Recommender</div>', unsafe_allow_html=True)
-
-    if not report_text:
-        st.info("Run the evaluation first so the system can prepare related-paper evidence.")
-    elif related_papers_status == "ready" and related_papers_result:
-        novelty_analysis = getattr(related_papers_result, "novelty_analysis", None)
-
-        if not novelty_analysis:
-            st.warning("Novelty directions were not generated for this run.")
-        else:
-            query_title = html.escape(related_papers_result.query_title or "Submitted Project")
-            query_summary = html.escape(related_papers_result.query_summary or "No summary available.")
-            crowded_topics = getattr(novelty_analysis, "crowded_topics", []) or []
-            crowded_topics_html = "".join(
-                f'<span class="novelty-chip">{html.escape(topic)}</span>'
-                for topic in crowded_topics
-            ) or '<span class="novelty-chip">No crowded topics identified.</span>'
-
-            st.markdown(
-                f"""
-<div class="novelty-panel">
-    <div class="novelty-kicker">Research Opportunity Analysis</div>
-    <div class="novelty-title">{query_title}</div>
-    <div class="novelty-note">{query_summary}</div>
-    <div class="novelty-note">Based on the retrieved related papers, these areas appear crowded or promising. This is advisory, not a claim about the entire research literature.</div>
-    <div class="novelty-label">Crowded topics</div>
-    <div class="novelty-chip-row">{crowded_topics_html}</div>
-</div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            for direction in getattr(novelty_analysis, "novelty_directions", []) or []:
-                direction_title = html.escape(direction.direction)
-                why_promising = html.escape(direction.why_promising)
-                how_to_extend = html.escape(direction.how_to_extend)
-                expected_contribution = html.escape(direction.expected_contribution)
-
-                st.markdown(
-                    f"""
-<div class="novelty-card">
-    <div class="novelty-card-title">{direction_title}</div>
-    <div class="novelty-field">
-        <div class="novelty-label">Why promising</div>
-        <div class="novelty-text">{why_promising}</div>
-    </div>
-    <div class="novelty-field">
-        <div class="novelty-label">How to extend</div>
-        <div class="novelty-text">{how_to_extend}</div>
-    </div>
-    <div class="novelty-field">
-        <div class="novelty-label">Expected contribution</div>
-        <div class="novelty-text">{expected_contribution}</div>
-    </div>
-</div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-    elif related_papers_status == "failed":
-        st.warning("Related-paper analysis failed in the previous run.")
-
-        if st.button("Retry Novelty Analysis"):
-            try:
-                with st.spinner("Retrying related papers and novelty directions..."):
-                    related_papers_result = cached_related_papers(
-                        report_text=report_text,
-                        limit=5,
-                    )
-                    st.session_state.related_papers_result = related_papers_result
-                    st.session_state.related_papers_status = "ready"
-                st.success("Novelty directions prepared successfully.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Retry failed: {e}")
-    else:
-        st.info("Novelty directions are prepared after related-paper analysis.")
-
-        if st.button("Run Novelty Analysis Now"):
-            try:
-                with st.spinner("Finding related papers and generating novelty directions..."):
-                    related_papers_result = cached_related_papers(
-                        report_text=report_text,
-                        limit=5,
-                    )
-                    st.session_state.related_papers_result = related_papers_result
-                    st.session_state.related_papers_status = "ready"
-                st.success("Novelty directions prepared successfully.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Novelty analysis failed: {e}")
-
-# Chatbot page
-elif page == "Chatbot":
-    st.markdown(
-        """
-<div class="chat-page">
-    <div class="chat-header">
-        <div>
-            <div class="chat-kicker">Paper Chatbot</div>
-            <div class="chat-title">Ask about the submission</div>
-            <div class="chat-subtitle">Answers are grounded in the uploaded report, rubric results, and related-paper analysis.</div>
-        </div>
-    </div>
-</div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    if not report_text or not audit_report or not st.session_state.get("store_id"):
-        st.info("Run the evaluation first so the chatbot can use the submitted paper and audit results.")
-    else:
-        transcript_parts = ['<div class="chat-transcript">']
-
-        if not st.session_state.chat_messages:
-            transcript_parts.append(
-                """
-<div class="chat-empty">
-    <div class="chat-row chat-row-assistant">
-        <div class="chat-bubble chat-bubble-assistant chat-bubble-intro">
-            <div class="chat-role">Auditor Assistant</div>
-            <div class="chat-text">Ask me about the submitted paper, rubric evidence, missing requirements, similarity results, or improvement ideas.</div>
-        </div>
-    </div>
-    <div class="chat-suggestion-panel">
-        <div class="chat-empty-title">Try one of these</div>
-        <div class="chat-suggestions">
-            <div class="chat-suggestion">What is the paper about?</div>
-            <div class="chat-suggestion">Which criteria need work?</div>
-            <div class="chat-suggestion">What evidence supports IMP-01?</div>
-            <div class="chat-suggestion">How can the submission improve?</div>
-        </div>
-    </div>
-</div>
-                """
-            )
-
-        for message in st.session_state.chat_messages:
-            if isinstance(message, HumanMessage):
-                transcript_parts.append(
-                    f"""
-<div class="chat-row chat-row-user">
-    <div class="chat-bubble chat-bubble-user">
-        <div class="chat-role">You</div>
-        <div class="chat-text">{format_chat_html(message.content)}</div>
-    </div>
-</div>
-                    """
-                )
-            elif isinstance(message, AIMessage):
-                transcript_parts.append(
-                    f"""
-<div class="chat-row chat-row-assistant">
-    <div class="chat-bubble chat-bubble-assistant">
-        <div class="chat-role">Auditor Assistant</div>
-        <div class="chat-text">{format_chat_html(format_ai_content(message.content))}</div>
-    </div>
-</div>
-                    """
-                )
-
-        transcript_parts.append("</div>")
-        st.markdown("".join(transcript_parts), unsafe_allow_html=True)
-
-        with st.form("chatbot_question_form", clear_on_submit=True):
-            input_col, send_col = st.columns([7, 1])
-            with input_col:
-                prompt = st.text_input(
-                    "Ask about the submitted paper or evaluation",
-                    placeholder="Ask about the submitted paper, rubric results, or related papers",
-                    label_visibility="collapsed",
-                )
-            with send_col:
-                submitted = st.form_submit_button("Send")
-
-        if submitted and prompt:
-            user_message = HumanMessage(content=prompt)
-            st.session_state.chat_messages.append(user_message)
-
-            with st.spinner("Searching the paper and evaluation..."):
-                try:
-                    vector_store = load_vector_store(st.session_state.store_id)
-                    app_context = serialize_audit_context(
-                        compiled_rubric=compiled,
-                        audit_report=audit_report,
-                        report_features=report_features,
-                        related_papers_result=related_papers_result,
-                    )
-                    answer = answer_chat_question(
-                        prompt=prompt,
-                        chat_history=st.session_state.chat_messages[:-1],
-                        vector_store=vector_store,
-                        app_context=app_context,
-                    )
-                except Exception as e:
-                    answer = f"I could not answer that right now because the chatbot failed: {e}"
-
-            st.session_state.chat_messages.append(AIMessage(content=answer))
-            st.rerun()
-
+main()

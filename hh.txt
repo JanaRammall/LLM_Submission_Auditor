@@ -1,0 +1,1473 @@
+LLM Submission Auditor - Project Explanation
+============================================
+
+1. Big Picture
+--------------
+
+This project is a Streamlit web application that helps evaluate a student paper or report against a project rubric.
+
+The application does four main jobs:
+
+1. Submission and evaluation
+   The user uploads a student report. The app either uses the built-in instructor rubric or lets the user upload a custom rubric. It then checks the report against the criteria.
+
+2. Similarity check
+   The app extracts the project topic from the report, searches academic papers, removes self-matches, compares the submitted report with candidate paper abstracts using embeddings, and shows semantic relatedness.
+
+3. Novelty directions
+   After related papers are found, the app asks the LLM to suggest research directions that may make the submitted project more original.
+
+4. Chatbot
+   The chatbot answers questions about the submitted paper, the rubric evaluation, related papers, and novelty suggestions. It is grounded in the uploaded report chunks and analysis results.
+
+The project is now split into folders so that each part has a clear responsibility:
+
+- app.py starts the Streamlit application.
+- ui/ contains page rendering code.
+- services/ contains orchestration and service logic.
+- audit/ contains rubric and evaluation logic.
+- rag/ contains document chunking and vector search.
+- research/ contains related-paper and novelty analysis.
+- core/ contains shared configuration and data models.
+- utils/ contains small formatting and JSON helpers.
+- data/ stores generated uploads and vector database files.
+
+
+2. Root Files
+-------------
+
+app.py
+~~~~~~
+
+This is the main entry point of the application.
+
+It should stay small. Its job is not to contain all business logic. Instead, it:
+
+1. Configures Streamlit.
+2. Loads CSS from styles.css.
+3. Initializes session state.
+4. Displays the hero/header.
+5. Displays the top navigation tabs.
+6. Calls the correct page renderer from ui/pages.py.
+
+Important ideas in app.py:
+
+- Streamlit reruns the script from top to bottom after many user actions.
+- Because of that, app.py stores app data in st.session_state.
+- Session state keeps analysis results, uploaded report text, related-paper results, chatbot history, and completion notices.
+
+Main workflow in app.py:
+
+1. The app starts.
+2. Session variables are initialized if missing.
+3. The user chooses a tab:
+   - Submission
+   - Evaluation
+   - Similarity Check
+   - Novelty Directions
+   - Chatbot
+4. app.py calls the matching function in ui/pages.py.
+
+
+styles.css
+~~~~~~~~~~
+
+This file controls the visual design of the Streamlit app.
+
+It defines:
+
+- Color variables.
+- Background colors.
+- Card styles.
+- Navigation tab styles.
+- Evaluation cards.
+- Similarity paper cards.
+- Novelty cards.
+- Chatbot layout.
+- File uploader appearance.
+- Button appearance.
+
+Simple idea:
+
+Streamlit gives default UI components. styles.css overrides them so the app looks like a custom dashboard instead of a plain Streamlit page.
+
+
+README.md
+~~~~~~~~~
+
+This file explains the project for someone opening the repository.
+
+It normally contains:
+
+- What the app does.
+- How to install dependencies.
+- How to configure API keys.
+- How to run Streamlit.
+- What the folder structure means.
+
+
+requirements.txt
+~~~~~~~~~~~~~~~~
+
+This file lists Python packages needed by the project.
+
+Examples of likely dependencies:
+
+- streamlit for the web UI.
+- langchain and langchain-google-genai for LLM and embedding calls.
+- chromadb or langchain-chroma for vector storage.
+- pydantic for structured data models.
+- requests for Semantic Scholar API calls.
+- tenacity for retries.
+- PDF parsing libraries.
+
+
+
+
+
+3. core/ Folder
+---------------
+
+The core folder contains shared pieces used across the whole project.
+
+It should not contain UI code, LLM prompts, or page-specific logic.
+
+
+core/config.py
+~~~~~~~~~~~~~~
+
+Purpose:
+
+Loads environment variables and exposes them as application settings.
+
+Important functions/classes:
+
+Settings
+    A dataclass that stores configuration values such as:
+    - Google API key.
+    - Semantic Scholar API key.
+    - Chat model name.
+    - Embedding model name.
+    - Chunk size.
+    - Chunk overlap.
+    - Retrieval count.
+
+_get_env_value(...)
+    A helper that tries to read one or more environment variable names.
+
+    This is useful because the app supports multiple possible names for the same key.
+
+    Example:
+    - GOOGLE_API_KEY
+    - GEMINI_API_KEY
+
+    Both can be accepted as a Google/Gemini API key.
+
+get_settings()
+    Returns the Settings object.
+
+    It also validates important configuration. For example, if the Google API key is missing, the app can show a clear error instead of failing later in a confusing way.
+
+How it works with the rest of the app:
+
+- services/llm.py calls get_settings() to know which model and API key to use.
+- rag/retrieval.py calls get_settings() to know chunk size, overlap, and embedding settings.
+- research/related_papers.py calls get_settings() to use Semantic Scholar keys and LLM settings.
+
+
+core/models.py
+~~~~~~~~~~~~~~
+
+Purpose:
+
+Defines the main structured data objects used by the audit system.
+
+Important models:
+
+RubricCriterion
+    Represents one rubric item.
+
+    It usually contains:
+    - id, such as IMP-01 or REP-04.
+    - title.
+    - description.
+    - weight or category information.
+    - search query or evaluation hints.
+
+CompiledRubric
+    Represents the full rubric after parsing or hardcoding.
+
+    It contains:
+    - project_title.
+    - a list of RubricCriterion objects.
+
+CriterionResult
+    Represents the evaluation result for one criterion.
+
+    It contains:
+    - criterion id.
+    - title.
+    - status, such as pass, partial, fail, or unknown.
+    - evidence.
+    - improvement suggestion.
+    - confidence or supporting chunk IDs.
+
+AuditReport
+    Represents the full evaluation output.
+
+    It contains:
+    - project title.
+    - all CriterionResult objects.
+    - summary information.
+
+Simple idea:
+
+Instead of passing loose dictionaries everywhere, the app uses Pydantic models. This makes the data more predictable and easier to validate.
+
+
+4. services/ Folder
+-------------------
+
+The services folder contains orchestration logic.
+
+It connects the UI to the lower-level modules.
+
+Think of services as the "workflow layer".
+
+
+services/llm.py
+~~~~~~~~~~~~~~~
+
+Purpose:
+
+Centralizes all LLM and embedding setup.
+
+Important functions:
+
+get_llm(model_name=None)
+    Creates a Gemini chat model using the API key and model name from settings.
+
+    If a model_name is passed, it uses that.
+    If not, it uses the default model from config.
+
+get_embeddings()
+    Creates the Gemini embedding model.
+
+    Embeddings are used for:
+    - vector search over report chunks.
+    - semantic similarity with related papers.
+
+invoke_with_retry(llm, prompt)
+    Calls the LLM with retry behavior.
+
+    This is important because API calls can fail because of:
+    - temporary network issues.
+    - rate limits.
+    - service errors.
+
+    tenacity retries the request with backoff instead of failing immediately.
+
+How it works with the app:
+
+- audit/rubric_compiler.py uses it to compile custom rubrics.
+- audit/checker.py uses it to evaluate semantic rubric criteria.
+- research/related_papers.py uses it to extract queries, explain similarity, and generate novelty directions.
+- services/chat_service.py uses it to answer chatbot questions.
+
+
+services/analysis_pipeline.py
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Purpose:
+
+Runs the main submission workflow.
+
+This file exists so ui/pages.py does not need to know every internal detail of evaluation.
+
+Important cached functions:
+
+cached_compile_rubric(instructions_text, model_name)
+    Compiles a custom rubric from uploaded instructions.
+
+    It is cached so the same rubric text does not need to be reprocessed again.
+
+cached_report_features(report_text)
+    Runs deterministic report analysis and caches the result.
+
+cached_pdf_text(file_bytes, kind)
+    Extracts text from a PDF and caches the result by file bytes.
+
+    This avoids re-reading the same PDF on every Streamlit rerun.
+
+cached_related_papers(report_text, model_name, limit=5, pipeline_version="semantic-v5")
+    Runs related-paper search and caches it.
+
+    The pipeline_version is useful because changing the similarity logic can force a new cached result.
+
+Important workflow functions:
+
+run_evaluation_analysis(uploaded_instructions, uploaded_report, model_name, use_instructor_rubric=True)
+    Runs the evaluation part only.
+
+    Steps:
+    1. Reset previous analysis state.
+    2. Decide rubric source:
+       - built-in instructor rubric, or
+       - uploaded custom rubric.
+    3. Extract text from the student report PDF.
+    4. Build deterministic report features.
+    5. Chunk the report and build/load the vector store.
+    6. Run the audit against rubric criteria.
+    7. Save results in st.session_state.
+    8. Mark evaluation as completed.
+
+    Important design point:
+    This function finishes the evaluation before related-paper similarity starts. That way the UI can tell the user "Evaluation completed" immediately instead of waiting for the slower similarity process.
+
+prepare_similarity_analysis(report_text, model_name)
+    Runs the related-paper and novelty part.
+
+    Steps:
+    1. Set related_papers_status to running.
+    2. Call get_related_papers_from_report().
+    3. Save the result in session state.
+    4. Mark similarity as completed or failed.
+    5. Update the user-facing submission notice.
+
+Why this split matters:
+
+The user had a problem where evaluation finished internally but the interface did not inform them until later. By separating evaluation and similarity, the app can show completion of evaluation first, then continue preparing similarity.
+
+
+services/chat_service.py
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Purpose:
+
+Handles chatbot answering.
+
+Important functions:
+
+serialize_audit_context(...)
+    Converts the audit report into compact text that can be passed to the LLM.
+
+    It includes:
+    - criteria.
+    - pass/fail status.
+    - evidence.
+    - improvement suggestions.
+
+serialize_retrieved_docs(...)
+    Converts retrieved report chunks into text for the chatbot prompt.
+
+answer_chat_question(prompt, chat_history, vector_store, app_context, model_name)
+    Main chatbot function.
+
+    Steps:
+    1. Takes the user question.
+    2. Retrieves relevant report chunks from the vector store.
+    3. Adds audit context and related-paper context.
+    4. Sends a grounded prompt to the LLM.
+    5. Returns the assistant answer.
+
+Simple idea:
+
+The chatbot should not answer from general memory only. It should answer based on the submitted report, rubric results, and related-paper analysis.
+
+
+5. audit/ Folder
+----------------
+
+The audit folder contains rubric and evaluation logic.
+
+It answers the question:
+
+"Does this submitted report satisfy the project requirements?"
+
+
+audit/compact_rubric.py
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Purpose:
+
+Defines a compact instructor rubric and helper functions for rubric simplification.
+
+Important items:
+
+COMPACT_CRITERIA
+    A list of core rubric criteria used by the app.
+
+    Criteria may cover things such as:
+    - custom LLM agent design.
+    - use of tools or RAG.
+    - implementation evidence.
+    - report structure.
+    - IEEE format.
+    - literature references.
+    - improvement areas.
+
+build_compact_rubric(original)
+    Takes a larger compiled rubric and converts it into the compact format used by the app.
+
+build_instructor_rubric(project_title=...)
+    Builds the hardcoded instructor rubric without requiring an LLM call.
+
+Why this helps performance:
+
+If the user chooses "Use instructor rubric", the app does not need to call Gemini to compile the rubric. That saves time.
+
+
+audit/rubric_compiler.py
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Purpose:
+
+Turns uploaded project instructions into a structured rubric.
+
+Important function:
+
+compile_rubric(instructions_text, model_name=None)
+    Steps:
+    1. Builds a rubric compiler prompt.
+    2. Sends the instructions to the LLM.
+    3. Expects JSON back.
+    4. Parses the JSON.
+    5. Validates it as a CompiledRubric.
+
+When it is used:
+
+- Only when the user chooses custom rubric upload.
+- Not needed when the built-in instructor rubric is used.
+
+
+audit/prompts.py
+~~~~~~~~~~~~~~~~
+
+Purpose:
+
+Stores prompt-building functions for audit-related LLM calls.
+
+Important function:
+
+rubric_compiler_prompt(instructions_text)
+    Creates the prompt that tells the LLM how to convert project instructions into JSON rubric criteria.
+
+Why this file exists:
+
+Prompts are easier to maintain when separated from the logic that calls the LLM.
+
+
+audit/report_analyzer.py
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Purpose:
+
+Performs deterministic report analysis.
+
+"Deterministic" means it does not use the LLM. It uses rules, regex, and text processing.
+
+Important items:
+
+SECTION_PATTERNS
+    A dictionary of section names and text patterns.
+
+    For example:
+    - abstract.
+    - introduction.
+    - methodology.
+    - results.
+    - conclusion.
+    - references.
+
+estimate_page_count(report_text)
+    Estimates how many pages the report has.
+
+detect_sections(report_text)
+    Checks which expected report sections appear in the text.
+
+extract_references_block(report_text)
+    Finds the references section.
+
+count_reference_entries(references_text)
+    Counts how many references are listed.
+
+extract_reference_years(references_text)
+    Extracts publication years from references.
+
+count_recent_references(years)
+    Counts references that are recent enough.
+
+build_report_features(report_text)
+    Main deterministic analysis function.
+
+    It returns a feature summary such as:
+    - estimated page count.
+    - detected sections.
+    - reference count.
+    - recent reference count.
+    - whether important sections are present.
+
+Why this exists:
+
+Some criteria are better checked with rules than with an LLM. For example, page count and reference count should not require a model call.
+
+
+audit/checker.py
+~~~~~~~~~~~~~~~~
+
+Purpose:
+
+Runs the actual rubric evaluation.
+
+It combines:
+
+1. deterministic checks, and
+2. semantic LLM checks.
+
+Important helper functions:
+
+make_result(...)
+    Creates a CriterionResult object in a consistent format.
+
+evaluate_ieee_and_pages(...)
+    Checks criteria related to formatting, page count, and report length.
+
+evaluate_literature_quality(...)
+    Checks references and literature quality using deterministic report features.
+
+evaluate_core_sections(...)
+    Checks whether the report contains expected sections.
+
+_serialize_docs(...)
+    Converts retrieved evidence chunks into text for the LLM prompt.
+
+build_small_semantic_prompt(...)
+    Builds a focused prompt for a small group of criteria.
+
+run_semantic_batch(...)
+    Evaluates a batch of semantic criteria with one LLM call.
+
+run_audit(...)
+    Main audit function.
+
+    Steps:
+    1. Receives the compiled rubric, report features, and vector store.
+    2. Runs deterministic checks first.
+    3. Groups semantic criteria into smaller batches.
+    4. Retrieves evidence chunks for each group.
+    5. Calls the LLM to judge semantic requirements.
+    6. Runs semantic groups in parallel where possible.
+    7. Combines deterministic and semantic results.
+    8. Preserves rubric order.
+    9. Returns an AuditReport.
+
+Important performance idea:
+
+Instead of one LLM call per criterion, criteria are grouped. Some groups are also run in parallel. This reduces waiting time while still keeping the evaluation grounded.
+
+
+6. rag/ Folder
+--------------
+
+RAG means Retrieval-Augmented Generation.
+
+In this project, RAG means:
+
+1. Split the uploaded report into chunks.
+2. Embed those chunks.
+3. Store them in a vector database.
+4. Retrieve relevant chunks when evaluating criteria or answering chatbot questions.
+
+
+rag/retrieval.py
+~~~~~~~~~~~~~~~~
+
+Purpose:
+
+Handles chunking, vector store creation, and evidence retrieval.
+
+Important functions:
+
+chunk_artifact_text(text, artifact_type, source_name, chunk_prefix)
+    Splits a document into smaller chunks.
+
+    Each chunk becomes a LangChain Document.
+
+    Metadata is added to each chunk, such as:
+    - artifact type.
+    - source name.
+    - chunk ID.
+
+    Example chunk IDs:
+    - R000
+    - R001
+    - R002
+
+    Simple idea:
+    LLMs work better with focused evidence. Instead of sending the whole report, the app sends only relevant chunks.
+
+build_or_load_vector_store_from_docs(docs, store_key)
+    Builds or loads a Chroma vector store.
+
+    Steps:
+    1. Checks whether a persisted vector store already exists.
+    2. If yes, loads it.
+    3. If no, embeds the chunks and stores them.
+
+    Why this helps:
+    Embedding the same report repeatedly is slow and expensive. Persisting the vector store lets the app reuse previous work.
+
+load_vector_store(store_id)
+    Loads a saved vector store by ID.
+
+retrieve_evidence(vector_store, query, k=None)
+    Searches the vector store for report chunks related to a query.
+
+    Used by:
+    - audit/checker.py for rubric evidence.
+    - services/chat_service.py for chatbot answers.
+
+
+7. research/ Folder
+-------------------
+
+The research folder handles external academic-paper comparison and novelty analysis.
+
+
+research/related_papers.py
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Purpose:
+
+Finds related academic papers and compares them semantically to the submitted report.
+
+Important data models:
+
+RelatedPaper
+    Represents one candidate paper.
+
+    It contains:
+    - title.
+    - year.
+    - authors.
+    - venue.
+    - abstract.
+    - URL.
+    - similarity score.
+    - confidence level.
+    - matched report chunks.
+    - explanation.
+
+NoveltyDirection
+    Represents one suggested research direction.
+
+    It contains:
+    - direction.
+    - why it is promising.
+    - how to extend the project.
+    - expected contribution.
+
+NoveltyAnalysis
+    Contains:
+    - crowded topics.
+    - novelty directions.
+
+RelatedPaperSearchResult
+    The final output of the related-paper pipeline.
+
+    It contains:
+    - query title.
+    - query summary.
+    - related papers.
+    - novelty analysis.
+
+Important functions:
+
+build_query_extraction_prompt(report_text)
+    Builds a prompt asking the LLM to extract:
+    - project title.
+    - short summary.
+    - keywords.
+    - search queries.
+
+extract_paper_query(report_text, model_name=None)
+    Calls the LLM using the query extraction prompt.
+
+search_semantic_scholar(query, limit=8)
+    Calls the Semantic Scholar API.
+
+    It searches for papers and retrieves:
+    - title.
+    - year.
+    - authors.
+    - venue.
+    - abstract.
+    - URL.
+
+    It also handles rate limits with retries and delay.
+
+_cosine_similarity(a, b)
+    Computes cosine similarity between two embedding vectors.
+
+calibrate_similarity_score(raw_score)
+    Converts raw embedding similarity into a more realistic 0 to 100 score.
+
+    Why this is needed:
+    Embedding cosine similarities are often high even for papers that are only broadly related. Calibration spreads the scores out so the ranking is easier to interpret.
+
+chunk_report_for_similarity(report_text)
+    Splits the report into chunks for related-paper comparison.
+
+remove_references_section(text)
+    Removes the references section before similarity scoring.
+
+    Why this matters:
+    The references section can contain paper titles. If kept, the system may think the submitted paper is similar to a candidate only because the candidate was cited.
+
+normalize_title(text)
+    Cleans a title for comparison.
+
+token_jaccard(a, b)
+    Measures token overlap between two strings.
+
+is_self_match(paper, project_title, report_text)
+    Detects whether a found paper is actually the same paper as the submitted report.
+
+    This prevents the app from comparing the report to itself.
+
+dedupe_candidates(candidate_groups, project_title, report_text, max_candidates=15)
+    Removes duplicate papers and self-matches.
+
+get_similarity_confidence(...)
+    Assigns confidence:
+    - High
+    - Medium
+    - Low
+
+    The confidence depends on:
+    - whether the candidate has an abstract.
+    - best chunk similarity.
+    - average top similarity.
+    - coverage across chunks.
+    - final calibrated score.
+
+score_candidate_papers(report_text, candidate_papers, limit, top_chunks_per_paper=3)
+    Main semantic scoring function.
+
+    Steps:
+    1. Remove references from the report.
+    2. Chunk the report.
+    3. Embed report chunks.
+    4. Embed candidate paper title plus abstract.
+    5. Compare each candidate with report chunks.
+    6. Find top matching chunks.
+    7. Compute calibrated semantic relatedness.
+    8. Assign confidence.
+    9. Return top papers.
+
+build_similarity_explanation_prompt(...)
+    Builds a prompt asking the LLM to explain why each paper is related.
+
+explain_related_papers(...)
+    Calls the LLM to generate short explanations.
+
+build_novelty_prompt(...)
+    Builds a prompt asking the LLM to identify crowded topics and novelty directions.
+
+generate_novelty_directions(...)
+    Calls the LLM and parses the novelty output.
+
+build_search_queries(...)
+    Cleans and limits search queries.
+
+    It avoids using only the exact project title because that can cause self-matches.
+
+get_related_papers_from_report(report_text, limit=5, model_name=None)
+    Main related-paper pipeline.
+
+    Steps:
+    1. Extract project title, summary, keywords, and search queries.
+    2. Search Semantic Scholar.
+    3. Remove duplicates and self-matches.
+    4. Score candidate papers with embeddings.
+    5. Ask the LLM to explain similarity.
+    6. Ask the LLM to generate novelty directions.
+    7. Return RelatedPaperSearchResult.
+
+
+8. ui/ Folder
+-------------
+
+The ui folder contains Streamlit page rendering code.
+
+It should focus on display and user interaction, not deep business logic.
+
+
+ui/pages.py
+~~~~~~~~~~~
+
+Purpose:
+
+Renders all application tabs.
+
+Important functions:
+
+render_submission_page(model_name)
+    Renders the Submission tab.
+
+    It shows:
+    - current analysis status.
+    - rubric source options.
+    - file uploaders.
+    - Run Analysis button.
+    - completion notices.
+
+    Important workflow:
+    1. User chooses built-in instructor rubric or custom rubric.
+    2. User uploads report.
+    3. User clicks Run Analysis.
+    4. The UI shows evaluation progress.
+    5. The evaluation finishes and informs the user.
+    6. Similarity preparation starts after evaluation.
+    7. The UI tells the user whether similarity is ready.
+
+render_evaluation_page()
+    Renders the Evaluation tab.
+
+    It shows:
+    - deterministic report analysis.
+    - rubric results.
+    - pass/partial/fail cards.
+    - evidence and improvement suggestions.
+
+render_report_features(...)
+    Displays deterministic report information such as pages, sections, and references.
+
+render_audit_results(...)
+    Displays the full audit report.
+
+render_similarity_page()
+    Renders the Similarity Check tab.
+
+    It shows:
+    - search basis.
+    - note that the score is semantic relatedness, not plagiarism.
+    - related papers.
+    - content similarity score.
+    - confidence.
+    - matched report chunks.
+    - paper abstract.
+
+render_related_papers(...)
+    Loops through related papers and renders each card.
+
+render_related_paper_card(...)
+    Renders one related-paper card.
+
+retry_related_papers_button(...)
+    Allows rerunning related-paper analysis if it failed or was not prepared.
+
+render_novelty_page()
+    Renders the Novelty Directions tab.
+
+render_novelty_analysis(...)
+    Displays crowded topics and novelty directions.
+
+render_novelty_card(...)
+    Displays one novelty suggestion.
+
+render_chatbot_page()
+    Renders the Chatbot tab.
+
+    It shows:
+    - chatbot header.
+    - suggested questions.
+    - transcript.
+    - input form.
+
+render_chat_transcript(...)
+    Displays previous user and assistant messages.
+
+render_chat_input(...)
+    Handles the text input and Send button.
+
+    When a user sends a question:
+    1. The question is added to chat history.
+    2. The vector store is loaded.
+    3. relevant chunks are retrieved.
+    4. answer_chat_question() generates the answer.
+    5. The assistant response is saved and displayed.
+
+
+9. utils/ Folder
+----------------
+
+The utils folder contains small helper functions used by multiple parts of the app.
+
+
+utils/formatting.py
+~~~~~~~~~~~~~~~~~~~
+
+Purpose:
+
+Formats text for display.
+
+Important functions:
+
+format_ai_content(content)
+    Normalizes AI message content into plain text.
+
+    This is useful because model outputs can sometimes be:
+    - a string.
+    - a list of text blocks.
+    - another object.
+
+format_chat_html(...)
+    Converts chat content into HTML-safe display format.
+
+
+utils/json_utils.py
+~~~~~~~~~~~~~~~~~~~
+
+Purpose:
+
+Handles JSON parsing from LLM responses.
+
+Important function:
+
+safe_json_load(text)
+    Tries to parse JSON.
+
+    If the model returns extra text around the JSON, it tries to extract the first JSON object from the response.
+
+Why this matters:
+
+LLMs sometimes return explanations even when asked for JSON only. This helper makes parsing more robust.
+
+
+
+11. data/ Folder
+----------------
+
+The data folder stores generated runtime data.
+
+
+data/uploads/
+~~~~~~~~~~~~~
+
+Purpose:
+
+Can store uploaded files if the app needs to persist them.
+
+
+data/vector_db/
+~~~~~~~~~~~~~~~
+
+Purpose:
+
+Stores persisted Chroma vector databases.
+
+Why this matters:
+
+Without persistence, the app would need to re-embed report chunks every time. Persisting the vector store saves time.
+
+
+12. docs/ Folder
+----------------
+
+Purpose:
+
+Reserved for documentation.
+
+It can contain:
+
+- technical notes.
+- screenshots.
+- instructor explanation.
+- architecture diagrams.
+- report material.
+
+
+13. experiments/ Folder
+-----------------------
+
+Purpose:
+
+Stores experimental notes or code that is not part of the stable application.
+
+experiments/notes.md
+    A place for development notes and ideas.
+
+
+14. Full Application Workflow
+-----------------------------
+
+This section explains how everything works together from the user's point of view.
+
+
+Step 1: App starts
+~~~~~~~~~~~~~~~~~~
+
+app.py runs.
+
+It:
+
+1. Configures Streamlit.
+2. Loads styles.css.
+3. Initializes st.session_state.
+4. Shows the main header.
+5. Shows navigation tabs.
+
+
+Step 2: User opens Submission tab
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+ui/pages.py renders the Submission page.
+
+The user chooses:
+
+1. Use instructor rubric.
+2. Upload custom rubric.
+
+If "Use instructor rubric" is selected:
+
+- The user only uploads the student report.
+- The app uses audit/compact_rubric.py.
+- This saves time because there is no rubric-compilation LLM call.
+
+If "Upload custom rubric" is selected:
+
+- The user uploads both the rubric/instructions PDF and the student report PDF.
+- The app compiles the rubric using the LLM.
+
+
+Step 3: User clicks Run Analysis
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The Submission page calls:
+
+run_evaluation_analysis(...)
+
+from services/analysis_pipeline.py.
+
+The UI shows a running status.
+
+
+Step 4: Rubric is prepared
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If using instructor rubric:
+
+1. build_instructor_rubric() creates the built-in rubric.
+2. No LLM is needed.
+
+If using custom rubric:
+
+1. The uploaded rubric PDF is parsed.
+2. compile_rubric() sends instructions to Gemini.
+3. The returned JSON is parsed into CompiledRubric.
+
+
+Step 5: Student report is parsed
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The uploaded student report PDF is converted into text.
+
+This text is stored in session state as report_text.
+
+The text is later used by:
+
+- deterministic report analysis.
+- vector store creation.
+- related-paper analysis.
+- chatbot answers.
+
+
+Step 6: Deterministic report analysis runs
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+audit/report_analyzer.py analyzes the report without an LLM.
+
+It checks:
+
+- estimated page count.
+- detected sections.
+- references section.
+- reference count.
+- recent references.
+
+This is faster and more reliable for simple measurable features.
+
+
+Step 7: RAG vector store is created
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+rag/retrieval.py splits the report into chunks.
+
+Example:
+
+- R000
+- R001
+- R002
+
+Each chunk is embedded and stored in Chroma.
+
+The vector store allows the app to retrieve the most relevant report chunks for a question or criterion.
+
+
+Step 8: Rubric audit runs
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+audit/checker.py runs run_audit().
+
+The audit has two parts:
+
+1. Deterministic checks
+   These use report_features directly.
+
+2. Semantic checks
+   These use:
+   - retrieved chunks from the vector store.
+   - LLM reasoning.
+
+Example:
+
+If a criterion asks whether the project includes a custom LLM agent, the app retrieves chunks about system design, agents, methods, or implementation. Then the LLM decides whether the criterion is satisfied and explains the evidence.
+
+
+Step 9: Evaluation completion is saved
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+After run_audit() finishes:
+
+- audit_report is saved.
+- analysis_completed becomes True.
+- analysis_duration_seconds is saved.
+- submission_notice tells the user the evaluation is completed.
+
+This is important because evaluation should be reported as done before similarity processing finishes.
+
+
+Step 10: Similarity analysis starts
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+After evaluation, the app calls:
+
+prepare_similarity_analysis(...)
+
+This calls research/related_papers.py.
+
+
+Step 11: Project search query is extracted
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The LLM reads the report and extracts:
+
+- title.
+- short summary.
+- keywords.
+- academic search queries.
+
+The search queries should be about the topic, method, and domain. They should not simply be the exact title.
+
+
+Step 12: Semantic Scholar is searched
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The app calls the Semantic Scholar API.
+
+It retrieves candidate academic papers with:
+
+- title.
+- abstract.
+- authors.
+- year.
+- venue.
+- URL.
+
+
+Step 13: Candidate papers are cleaned
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The app removes:
+
+- candidates without title or abstract.
+- duplicates.
+- self-matches.
+
+Self-match removal matters because the uploaded report may be an existing paper. The app should not compare the report with itself.
+
+
+Step 14: Similarity scoring runs
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The report references section is removed first.
+
+Then:
+
+1. The report is chunked.
+2. Report chunks are embedded.
+3. Candidate title plus abstract is embedded.
+4. Cosine similarity is computed.
+5. Best matching chunks are selected.
+6. A calibrated semantic relatedness score is produced.
+7. A confidence level is assigned.
+
+Important:
+
+This is not a plagiarism score.
+
+It is a semantic relatedness score between the submitted report and candidate paper title/abstract.
+
+
+Step 15: Similarity explanations are generated
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The LLM receives:
+
+- project title.
+- project summary.
+- candidate paper abstracts.
+- matched chunks.
+- similarity scores.
+
+It writes short explanations such as:
+
+"This paper is related because both discuss LLM-based multi-agent phishing detection and compare detection performance across web page features."
+
+
+Step 16: Novelty directions are generated
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The LLM receives:
+
+- submitted project summary.
+- related papers.
+- similarity reasons.
+- matched chunks.
+
+It identifies:
+
+- crowded topics.
+- possible novelty directions.
+
+Important wording:
+
+The app should not say "there is no research on this."
+
+It should say:
+
+"Based on the retrieved related papers, this direction appears less emphasized."
+
+
+Step 17: User views Evaluation tab
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The Evaluation tab displays:
+
+- deterministic report analysis.
+- criterion cards.
+- evidence.
+- improvement suggestions.
+- pass/partial/fail status.
+
+Each card is expandable so the interface does not show too much text at once.
+
+
+Step 18: User views Similarity Check tab
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The Similarity tab displays:
+
+- search basis.
+- related papers.
+- content similarity or semantic relatedness score.
+- confidence.
+- why the paper is similar.
+- matched report chunks.
+- paper abstract.
+- paper link.
+
+
+Step 19: User views Novelty Directions tab
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The Novelty tab displays:
+
+- crowded topics.
+- novelty directions.
+- why each direction is promising.
+- how to extend the project.
+- expected contribution.
+
+
+Step 20: User uses Chatbot tab
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The chatbot can answer questions such as:
+
+- What is the paper about?
+- Did the paper pass?
+- Which criteria need work?
+- What evidence supports IMP-01?
+- How can the submission improve?
+- Which related papers are closest?
+- What novelty direction is strongest?
+
+The chatbot uses:
+
+- vector store retrieval.
+- audit report context.
+- related-paper context.
+- previous chat history.
+
+
+15. Why the Project Is Structured This Way
+------------------------------------------
+
+The structure separates responsibilities.
+
+app.py
+    Starts the app and routes pages.
+
+ui/
+    Displays pages and handles user actions.
+
+services/
+    Coordinates workflows.
+
+audit/
+    Handles rubric and evaluation.
+
+rag/
+    Handles chunking, embeddings, and retrieval.
+
+research/
+    Handles academic paper search, similarity, and novelty suggestions.
+
+core/
+    Holds shared settings and data models.
+
+utils/
+    Holds small reusable helpers.
+
+legacy/
+    Holds old code kept away from the main flow.
+
+This makes the app easier to maintain because each file has a clear job.
+
+
+16. Performance Ideas Already Used
+----------------------------------
+
+1. Built-in instructor rubric
+   Avoids an LLM call for rubric compilation.
+
+2. PDF text caching
+   Avoids re-parsing the same uploaded PDF.
+
+3. Report feature caching
+   Avoids rerunning deterministic analysis.
+
+4. Vector store persistence
+   Avoids re-embedding the same report chunks.
+
+5. Grouped semantic rubric checks
+   Avoids one LLM call per criterion.
+
+6. Parallel semantic audit groups
+   Allows independent rubric groups to be checked at the same time.
+
+7. Separate evaluation from similarity
+   Lets the user know evaluation is done before slower related-paper analysis finishes.
+
+
+17. Important Terms Explained Simply
+------------------------------------
+
+Rubric
+    A list of criteria used to judge the student report.
+
+Criterion
+    One requirement from the rubric.
+
+Deterministic analysis
+    Analysis done with code rules, not an LLM.
+
+Semantic analysis
+    Analysis where the LLM judges meaning, not just exact words.
+
+Embedding
+    A numeric representation of text meaning.
+
+Vector store
+    A database that stores embeddings and lets the app search by meaning.
+
+RAG
+    Retrieval-Augmented Generation. The app retrieves relevant chunks before asking the LLM to answer.
+
+Semantic Scholar
+    An academic paper search API.
+
+Self-match
+    When the related-paper search finds the same paper as the submitted report.
+
+Semantic relatedness score
+    A score showing how related the submitted report is to a candidate paper. It is not a plagiarism score.
+
+Novelty direction
+    A suggested way to make the project more original or stronger based on related work.
+
+
+18. End-to-End Data Flow Summary
+--------------------------------
+
+User uploads report
+    -> Streamlit file uploader
+    -> services/analysis_pipeline.py extracts text
+    -> audit/report_analyzer.py builds deterministic features
+    -> rag/retrieval.py chunks and embeds report
+    -> audit/checker.py evaluates rubric
+    -> ui/pages.py displays evaluation
+    -> research/related_papers.py finds related papers
+    -> ui/pages.py displays similarity
+    -> research/related_papers.py generates novelty directions
+    -> ui/pages.py displays novelty
+    -> services/chat_service.py answers user questions
+
+
+19. What Each Main Result Means
+-------------------------------
+
+Evaluation result
+    Shows whether the report satisfies each rubric criterion.
+
+Evidence
+    Shows text from the report that supports the decision.
+
+Improvement
+    Shows what the student should add or improve.
+
+Content similarity / semantic relatedness
+    Shows how close the submitted report is to related academic papers.
+
+Confidence
+    Shows how much evidence supports the similarity score.
+
+Novelty directions
+    Show possible ways to make the project more original.
+
+Chatbot answer
+    Provides a grounded answer based on the uploaded report and app analysis.
+
+
+20. Practical Explanation for an Instructor
+-------------------------------------------
+
+This app evaluates student submissions using a hybrid approach.
+
+First, it performs deterministic checks for measurable report features such as sections, pages, and references. Then it builds a vector store from the uploaded report and retrieves relevant evidence chunks for each rubric criterion. Semantic criteria are judged by an LLM using only the retrieved evidence.
+
+After evaluation, the app searches Semantic Scholar for related academic papers. It removes references from the submitted report before scoring to avoid citation-based false similarity. It compares report chunks with candidate paper titles and abstracts using embeddings, then reports a calibrated semantic relatedness score and confidence level.
+
+Finally, it analyzes the retrieved papers to suggest novelty directions. This turns the system from only a checker into an advisor that can help students improve originality and research contribution.

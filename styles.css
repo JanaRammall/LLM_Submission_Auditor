@@ -212,6 +212,26 @@ div[data-testid="stExpander"] {
     line-height: 1.5;
 }
 
+.submission-badge-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.submission-complete {
+    display: inline-flex;
+    align-items: center;
+    min-height: 26px;
+    padding: 4px 9px;
+    border-radius: 8px;
+    color: #dcfce7;
+    background: rgba(34,197,94,0.12);
+    border: 1px solid rgba(34,197,94,0.34);
+    font-size: 12px;
+    font-weight: 850;
+}
+
 .analysis-panel {
     background: rgba(17,32,56,0.74);
     border: 1px solid rgba(91,124,173,0.42);

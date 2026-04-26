@@ -1,4 +1,8 @@
-from models import RubricCriterion
+"""Prompt templates used by model-backed rubric compilation.
+
+Prompts live separately from service code so they can be edited without
+touching the orchestration logic.
+"""
 
 
 def rubric_compiler_prompt(instructions_text: str) -> str:
@@ -73,45 +77,3 @@ Project instructions:
 \"\"\"
 """
 
-
-def semantic_criterion_query(criterion: RubricCriterion) -> str:
-    return f"{criterion.title}. {criterion.description}"
-
-
-def semantic_criterion_prompt(criterion: RubricCriterion, evidence_text: str) -> str:
-    return f"""
-You are a strict but fair university project auditor.
-
-Evaluate ONLY this semantic criterion.
-
-Criterion ID: {criterion.criterion_id}
-Category: {criterion.category}
-Title: {criterion.title}
-Description: {criterion.description}
-Expected evidence source: {criterion.expected_evidence_source}
-Priority: {criterion.priority}
-Auditability: {criterion.auditability}
-Notes: {criterion.notes or "N/A"}
-
-IMPORTANT RULES:
-1. Use ONLY the provided evidence.
-2. Do not confuse this criterion with neighboring criteria.
-3. If the evidence clearly supports the criterion, return Pass.
-4. If the evidence clearly shows the requirement is not met, return Fail.
-5. If the evidence is partial, vague, or incomplete, return Partial.
-6. If there is not enough evidence from the provided artifacts, return Not enough evidence.
-7. Return ONLY valid JSON in this format:
-{{
-  "criterion_id": "{criterion.criterion_id}",
-  "status": "Pass" | "Partial" | "Fail" | "Not enough evidence",
-  "evidence_found": "short grounded summary",
-  "missing_or_weak": "what is missing or unclear",
-  "improvement": "one concrete improvement",
-  "evidence_chunk_ids": ["C000", "C001"]
-}}
-
-Evidence:
-\"\"\"
-{evidence_text}
-\"\"\"
-"""

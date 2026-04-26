@@ -1,12 +1,19 @@
+"""Chunk report text and manage the Chroma vector store used for retrieval.
+
+The vector store supports two workflows:
+- audit evidence retrieval for semantic rubric checks;
+- chatbot retrieval so answers can cite submitted-paper chunks.
+"""
+
 import os
 from typing import List, Tuple
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from config import get_settings
+from core.config import get_settings
+from services.llm import get_embeddings
 
 
 def chunk_artifact_text(text: str, artifact_type: str, source_name: str, chunk_prefix: str) -> List[Document]:
@@ -36,13 +43,15 @@ def chunk_artifact_text(text: str, artifact_type: str, source_name: str, chunk_p
 
 
 def build_or_load_vector_store_from_docs(docs: List[Document], store_key: str) -> Tuple[Chroma, str]:
+    """Create a Chroma store once per report, or reuse it on later reruns.
+
+    Streamlit reruns the script often. Reusing a persisted store avoids paying
+    embedding cost every time the user changes tabs or refreshes the page.
+    """
     settings = get_settings()
     persist_dir = os.path.join(settings.vector_db_dir, store_key)
 
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model=settings.embedding_model,
-        google_api_key=settings.google_api_key
-    )
+    embeddings = get_embeddings()
 
     if os.path.exists(persist_dir) and os.listdir(persist_dir):
         vector_store = Chroma(
@@ -67,10 +76,7 @@ def load_vector_store(store_id: str) -> Chroma:
     settings = get_settings()
     persist_dir = os.path.join(settings.vector_db_dir, store_id)
 
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model=settings.embedding_model,
-        google_api_key=settings.google_api_key
-    )
+    embeddings = get_embeddings()
 
     return Chroma(
         collection_name="submission_chunks",

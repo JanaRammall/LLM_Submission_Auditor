@@ -1,3 +1,10 @@
+"""Pydantic models shared by rubric compilation and audit results.
+
+These models define the contract between the LLM prompts, audit checker, and
+Streamlit UI. Keeping the schemas here makes validation failures easier to
+trace when a model returns malformed JSON.
+"""
+
 from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 

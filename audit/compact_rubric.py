@@ -1,5 +1,13 @@
+"""Course-specific compact rubric used by the auditor UI and checker.
+
+The LLM first extracts a broad rubric from the uploaded instructions. This file
+then maps the result to the stable rubric used by the app so the UI and audit
+logic always work with predictable criterion IDs.
+"""
+
 from typing import List
-from models import RubricCriterion, CompiledRubric
+
+from core.models import CompiledRubric, RubricCriterion
 
 
 COMPACT_CRITERIA = [
@@ -87,7 +95,7 @@ COMPACT_CRITERIA = [
         "criterion_id": "REP-02",
         "category": "Report",
         "title": "Literature Review Quality",
-        "description": "Does the report include a literature review with enough references, including recent papers from 2025–2026?",
+        "description": "Does the report include a literature review with enough references, including recent papers from 2025-2026?",
         "expected_evidence_source": "report",
         "priority": "high",
         "auditability": "direct",
@@ -131,5 +139,17 @@ def build_compact_rubric(original: CompiledRubric) -> CompiledRubric:
     return CompiledRubric(
         project_title=original.project_title,
         summary=original.summary,
+        criteria=criteria,
+    )
+
+
+def build_instructor_rubric(
+    project_title: str = "COE548/748 Final Project: Building a Specialized LLM Agent",
+) -> CompiledRubric:
+    """Return the built-in instructor rubric without making an LLM call."""
+    criteria: List[RubricCriterion] = [RubricCriterion(**item) for item in COMPACT_CRITERIA]
+    return CompiledRubric(
+        project_title=project_title,
+        summary="Instructor-defined compact rubric for the specialized LLM agent final project.",
         criteria=criteria,
     )

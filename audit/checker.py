@@ -1,51 +1,29 @@
-import json
+"""Audit submitted reports against deterministic and LLM-based rubric checks.
+
+The audit combines two styles of checks:
+- deterministic checks for page count, references, and required sections;
+- semantic LLM checks for requirements that need evidence interpretation.
+
+The semantic checks are grouped into independent batches and run in parallel to
+reduce total audit time while preserving the final compact-rubric order.
+"""
+
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, List, Dict
 
 from pydantic import ValidationError
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.documents import Document
 
-from config import get_settings
-from models import RubricCriterion, CriterionResult, AuditReport, CompiledRubric
-from retrieval import retrieve_evidence
+from core.models import RubricCriterion, CriterionResult, AuditReport, CompiledRubric
+from rag.retrieval import retrieve_evidence
+from services.llm import get_llm, invoke_with_retry
+from utils.json_utils import safe_json_load
 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-def get_llm(model_name: Optional[str] = None) -> ChatGoogleGenerativeAI:
-    settings = get_settings()
-    return ChatGoogleGenerativeAI(
-        model=model_name or settings.chat_model,
-        api_key=settings.google_api_key,
-        temperature=0.0,
-    )
-
-
-@retry(
-    stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=2, min=2, max=30),
-    retry=retry_if_exception_type(Exception),
-    reraise=True,
-)
-def _invoke(llm: ChatGoogleGenerativeAI, prompt: str):
-    return llm.invoke(prompt)
-
-
-def _safe_json_load(text: str) -> dict:
-    text = text.strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            return json.loads(text[start:end + 1])
-        raise ValueError("Model did not return valid JSON.")
 
 
 def _serialize_docs(docs: List[Document]) -> str:
@@ -105,9 +83,9 @@ def evaluate_literature_quality(report_features: Dict) -> CriterionResult:
     return make_result(
         "REP-02",
         status,
-        f"Related Work detected: {has_related}. Reference count: {ref_count}. References from 2025–2026: {recent_count}.",
-        "" if status == "Pass" else "The literature review is missing, too small, or lacks enough recent references from 2025–2026.",
-        "Ensure a clear Related Work section, include at least 10 references, and strengthen the review with 2025–2026 papers.",
+        f"Related Work detected: {has_related}. Reference count: {ref_count}. References from 2025-2026: {recent_count}.",
+        "" if status == "Pass" else "The literature review is missing, too small, or lacks enough recent references from 2025-2026.",
+        "Ensure a clear Related Work section, include at least 10 references, and strengthen the review with 2025-2026 papers.",
     )
 
 
@@ -198,8 +176,8 @@ def run_semantic_batch(
     evidence_text = _serialize_docs(docs)
     prompt = build_small_semantic_prompt(criteria, evidence_text, group_name)
 
-    response = _invoke(llm, prompt)
-    parsed = _safe_json_load(response.content)
+    response = invoke_with_retry(llm, prompt)
+    parsed = safe_json_load(response.content)
     raw_results = parsed.get("results", [])
 
     results: List[CriterionResult] = []
@@ -241,6 +219,12 @@ def run_audit(
     available_artifacts: Dict[str, bool],
     model_name: Optional[str] = None,
 ) -> AuditReport:
+    """Return rubric results for the already-indexed report.
+
+    The caller has already extracted report features and built a vector store.
+    This function adds deterministic report checks first, then asks the LLM to
+    judge the semantic criteria using retrieved chunks as evidence.
+    """
     active_results: List[CriterionResult] = []
     deferred_results: List[CriterionResult] = []
 
@@ -288,3 +272,4 @@ def run_audit(
         active_results=active_results,
         deferred_results=deferred_results,
     )
+
